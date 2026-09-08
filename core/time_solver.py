@@ -25,7 +25,7 @@ All coordinates and matrices must be in **metres** (SI units).
 """
 
 import numpy as np
-from scipy.sparse.linalg import spsolve
+from scipy.sparse.linalg import splu
 
 
 # ======================================================================
@@ -55,8 +55,11 @@ def compute_gamma(Cs_history, gamma0=72.0, gamma_inf=35.0):
 def solve_diffusion(fem_results, domain_metadata,
                     D=1e-9, k=1e-5,
                     theta=0.7, dtau=0.01, n_steps=100,
+                    total_time=None,
                     snapshot_steps=None,
-                    progress_cb=None):
+                    progress_cb=None,
+                    calibration=None,
+                    verbose=True):
     """
     Run a forward diffusion simulation.
 
@@ -75,14 +78,24 @@ def solve_diffusion(fem_results, domain_metadata,
         Implicitness parameter (0 = explicit, 0.5 = Crank-Nicolson,
         1 = fully implicit).
     dtau : float
-        Dimensionless time step.
+        Time step size, in seconds.
     n_steps : int
-        Number of time steps.
+        Number of time steps. Ignored if ``total_time`` is given.
+    total_time : float or None
+        Total simulated time in seconds. If given, overrides ``n_steps``
+        as ``n_steps = round(total_time / dtau)`` (e.g. 600 for 10 minutes).
     snapshot_steps : list of int or None
         Steps at which to save full concentration fields for
         contour plotting.  Default: [1, 10, 50, n_steps].
     progress_cb : callable(step, n_steps, C, Cs) or None
         Optional callback for GUI progress updates.
+    calibration : object or None
+        Optional concentration→IFT calibration with a ``gamma(Cs)``
+        method (see ``core.calibration.Calibration``).  If None, the
+        placeholder linear ``compute_gamma`` is used.
+    verbose : bool
+        Print per-step diagnostics to the console.  Set False for
+        batch runs (e.g. inside the parameter-estimation loop).
 
     Returns
     -------
@@ -96,6 +109,10 @@ def solve_diffusion(fem_results, domain_metadata,
         'triangles'     – (T, 3) connectivity
         'kD'            – dimensionless Biot number
         'diagnostics'   – per-step diagnostics string
+        'n_steps'       – actual number of steps run (post total_time override)
+        'actual_time'   – simulated duration actually reached, in seconds
+                          (n_steps * dtau; may differ slightly from a
+                          requested total_time due to rounding)
     """
     # ---- Unpack FEM data ----
     H  = fem_results['H']
@@ -108,16 +125,21 @@ def solve_diffusion(fem_results, domain_metadata,
 
     N = H.shape[0]
 
+    # ---- Convert requested wall-clock duration into a step count ----
+    if total_time is not None:
+        n_steps = max(1, round(total_time / dtau))
+
     # ---- Compute dimensionless Biot number ----
     r_n = domain_metadata.get('r_inner_m', 1e-3)
     kD = (k * r_n) / D
-    print(f"\n── Simulation parameters ──")
-    print(f"  D  = {D:.2e} m²/s")
-    print(f"  k  = {k:.2e} m/s")
-    print(f"  r_n= {r_n:.4e} m")
-    print(f"  kD = {kD:.4f}  (Biot number)")
-    print(f"  θ  = {theta},  Δτ = {dtau},  steps = {n_steps}")
-    print(f"  N  = {N} nodes\n")
+    if verbose:
+        print("\n── Simulation parameters ──")
+        print(f"  D  = {D:.2e} m²/s")
+        print(f"  k  = {k:.2e} m/s")
+        print(f"  r_n= {r_n:.4e} m")
+        print(f"  kD = {kD:.4f}  (Biot number)")
+        print(f"  θ  = {theta},  Δτ = {dtau},  steps = {n_steps}")
+        print(f"  N  = {N} nodes\n")
 
     # ---- Total system matrices ----
     # K already includes D inside it from assembly
@@ -127,6 +149,9 @@ def solve_diffusion(fem_results, domain_metadata,
     # ---- Time discretisation ----
     H_dt = H / dtau
     A = H_dt + theta * K_total         # LHS (constant)
+    # A never changes between steps, so factorise once instead of
+    # re-solving from scratch every step.
+    A_lu = splu(A.tocsc())
 
     # ---- Initial condition ----
     C = np.zeros(N)
@@ -147,14 +172,15 @@ def solve_diffusion(fem_results, domain_metadata,
     time_history = []
     diagnostics = []
 
-    print("Starting simulation...\n")
+    if verbose:
+        print("Starting simulation...\n")
 
     for step in range(1, n_steps + 1):
         # RHS
         B = (H_dt - (1.0 - theta) * K_total) @ C + F_total
 
         # Solve
-        C = spsolve(A, B)
+        C = A_lu.solve(B)
 
         # Stability clip (physically: concentration ∈ [0, 1])
         C = np.clip(C, 0.0, 1.0)
@@ -174,7 +200,7 @@ def solve_diffusion(fem_results, domain_metadata,
                 + (" ⚠ NaN!" if has_nan else ""))
         diagnostics.append(diag)
 
-        if step <= 5 or step % 20 == 0 or step == n_steps:
+        if verbose and (step <= 5 or step % 20 == 0 or step == n_steps):
             print(diag)
 
         # Snapshot
@@ -186,12 +212,16 @@ def solve_diffusion(fem_results, domain_metadata,
             progress_cb(step, n_steps, C, Cs)
 
     # ---- Surface tension ----
-    gamma = compute_gamma(Cs_history)
+    if calibration is not None:
+        gamma = calibration.gamma(np.asarray(Cs_history))
+    else:
+        gamma = compute_gamma(Cs_history)
 
-    print(f"\n── Simulation complete ──")
-    print(f"  Final Cs  = {Cs_history[-1]:.6f}")
-    print(f"  Final C range: [{C.min():.6e}, {C.max():.6e}]")
-    print(f"  γ range: [{gamma.min():.2f}, {gamma.max():.2f}] mN/m")
+    if verbose:
+        print("\n── Simulation complete ──")
+        print(f"  Final Cs  = {Cs_history[-1]:.6f}")
+        print(f"  Final C range: [{C.min():.6e}, {C.max():.6e}]")
+        print(f"  γ range: [{gamma.min():.2f}, {gamma.max():.2f}] mN/m")
 
     return dict(
         C_final=C,
@@ -203,4 +233,6 @@ def solve_diffusion(fem_results, domain_metadata,
         triangles=triangles,
         kD=kD,
         diagnostics=diagnostics,
+        n_steps=n_steps,
+        actual_time=time_history[-1],
     )

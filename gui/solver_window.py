@@ -11,9 +11,8 @@ Shows:
 """
 
 import numpy as np
-from PyQt6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QLabel,
-                             QGroupBox, QFrame, QTabWidget, QScrollArea)
-from PyQt6.QtCore import Qt
+from PyQt6.QtWidgets import (QWidget, QVBoxLayout, QLabel,
+                             QGroupBox, QTabWidget, QPlainTextEdit)
 
 # Use matplotlib for tricontourf (pyqtgraph doesn't support it)
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg
@@ -216,19 +215,26 @@ class SolverWindow(QWidget):
         params_box.setLayout(pv)
         layout.addWidget(params_box)
 
-        # Step log (scrollable)
+        # Step log. Long runs produce one line per step (100k+ for a
+        # multi-minute sim), so show only the head and tail — dumping every
+        # line into a widget freezes the UI. QPlainTextEdit also handles large
+        # text far better than QLabel.
         log_box = QGroupBox("Step log")
         lv = QVBoxLayout()
-        scroll = QScrollArea()
-        scroll.setWidgetResizable(True)
-        log_widget = QLabel("\n".join(self.sim.get('diagnostics', [])))
-        log_widget.setStyleSheet(
+        diagnostics = self.sim.get('diagnostics', [])
+        max_lines = 500
+        if len(diagnostics) > max_lines:
+            head, tail = diagnostics[:20], diagnostics[-(max_lines - 20):]
+            omitted = len(diagnostics) - len(head) - len(tail)
+            shown = head + [f"… {omitted} steps omitted …"] + tail
+        else:
+            shown = diagnostics
+        log_view = QPlainTextEdit("\n".join(shown))
+        log_view.setReadOnly(True)
+        log_view.setStyleSheet(
             "color:#8e95ae; font-family:'Consolas','Menlo',monospace; "
             "font-size:8.5pt; padding:6px;")
-        log_widget.setTextInteractionFlags(
-            Qt.TextInteractionFlag.TextSelectableByMouse)
-        scroll.setWidget(log_widget)
-        lv.addWidget(scroll)
+        lv.addWidget(log_view)
         log_box.setLayout(lv)
         layout.addWidget(log_box, stretch=2)
 

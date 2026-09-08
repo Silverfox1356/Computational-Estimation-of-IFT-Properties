@@ -114,12 +114,20 @@ def assemble_stiffness_matrix(points, triangles, D=1.0):
         if A < 1e-30:
             continue
 
-        R_c = np.mean(r)
+        # The domain is the FULL mirrored cross-section, so left-half
+        # triangles have r < 0.  The axisymmetric radius is |r| — a
+        # signed mean would give those elements a NEGATIVE diffusion
+        # coefficient (indefinite K, wildly parameter-sensitive
+        # solutions).  The 1/r correction term carries sign(r) instead:
+        # (1/r)∂c/∂r · |r| = sign(r)·∂c/∂r, which is mirror-consistent
+        # because ∂c/∂r also flips sign on the reflected half.
+        R_c = np.mean(np.abs(r))
+        sgn = 1.0 if np.mean(r) >= 0.0 else -1.0
 
         for i in range(3):
             for j in range(3):
                 diffusion = D * R_c * A * np.dot(grads[i], grads[j])
-                axisym = -D * (A / 3.0) * grads[j, 0]
+                axisym = -D * sgn * (A / 3.0) * grads[j, 0]
                 K[tri[i], tri[j]] += diffusion + axisym
 
     return csr_matrix(K)
@@ -191,20 +199,26 @@ def classify_boundary_edges(points, boundary_edges, domain_metadata):
 # ======================================================================
 # Boundary terms  (Robin BC on interface only)
 # ======================================================================
-def assemble_boundary_terms(points, interface_edges, kD):
+def assemble_boundary_terms(points, interface_edges, k):
     """
     Assemble the boundary mass matrix Kb and load vector F
     for a Robin BC on the free-surface interface:
 
-        -D ∂c/∂n = kD (c - c∞)
+        -D ∂c/∂n = k (c - c∞)
 
     where c∞ = 1 (normalised bulk concentration).
+
+    Note ``k`` here is the PHYSICAL mass-transfer coefficient in m/s.  It
+    is deliberately not called ``kD``: everywhere else in this project
+    ``kD`` means the dimensionless Biot number k·rₙ/D (see
+    ``core.time_solver`` and ``core.estimator``), and the two differ by
+    several orders of magnitude.
 
     Parameters
     ----------
     points : (M, 2) ndarray
     interface_edges : list of [i, j]
-    kD : float  – mass-transfer coefficient (m/s)
+    k : float  – mass-transfer coefficient (m/s)
 
     Returns
     -------
@@ -223,11 +237,11 @@ def assemble_boundary_terms(points, interface_edges, kD):
         L = np.sqrt((r2 - r1) ** 2 + (z2 - z1) ** 2)
         R_mid = 0.5 * (abs(r1) + abs(r2))   # axisymmetric |r|
 
-        K_e = (kD * R_mid * L / 6.0) * np.array([
+        K_e = (k * R_mid * L / 6.0) * np.array([
             [2.0, 1.0],
             [1.0, 2.0],
         ])
-        F_e = (kD * R_mid * L / 2.0) * np.array([1.0, 1.0])
+        F_e = (k * R_mid * L / 2.0) * np.array([1.0, 1.0])
 
         idx = [i, j]
         for a in range(2):
@@ -325,6 +339,7 @@ def run_sanity_checks(H, K, Kb, F, points, interface_edges, wall_edges):
         results['H_symmetric'],
         results['K_near_symmetric'],       # relaxed, not strict
         results['H_diag_all_positive'],
+        results['K_diag_positive'],
         results['sparsity_ok'],
         results['boundary_terms_ok'],
         results['F_only_on_interface'],
@@ -382,7 +397,7 @@ def debug_F_vector(F, points, interface_edges):
 # Master function
 # ======================================================================
 def assemble_fem_system(points, triangles, boundary_edges,
-                        domain_metadata, D=1e-9, kD=1e-5):
+                        domain_metadata, D=1e-9, k=1e-5):
     """
     Full FEM assembly pipeline.
 
@@ -393,14 +408,17 @@ def assemble_fem_system(points, triangles, boundary_edges,
     boundary_edges : (E, 2) ndarray
     domain_metadata : dict
     D  : float  – diffusion coefficient (m²/s), default 1e-9 (water)
-    kD : float  – mass-transfer coefficient (m/s)
+    k  : float  – PHYSICAL mass-transfer coefficient (m/s).  Not the
+                  dimensionless Biot number kD = k·rₙ/D that the solver
+                  and estimator work in.
 
     Returns
     -------
     fem : dict with keys
         'H', 'K', 'Kb', 'F',
         'interface_edges', 'wall_edges',
-        'sanity', 'points', 'triangles'
+        'sanity', 'points', 'triangles',
+        'assembly_D', 'assembly_k'
     """
     H = assemble_mass_matrix(points, triangles)
     K = assemble_stiffness_matrix(points, triangles, D=D)
@@ -408,7 +426,7 @@ def assemble_fem_system(points, triangles, boundary_edges,
     interface_edges, wall_edges = classify_boundary_edges(
         points, boundary_edges, domain_metadata)
 
-    Kb, F = assemble_boundary_terms(points, interface_edges, kD)
+    Kb, F = assemble_boundary_terms(points, interface_edges, k)
 
     # Print F-vector diagnostics to console for debugging
     debug_F_vector(F, points, interface_edges)
@@ -423,4 +441,10 @@ def assemble_fem_system(points, triangles, boundary_edges,
         sanity=sanity,
         points=points,
         triangles=triangles,
+        # Coefficients baked into K (D) and Kb/F (k) at assembly time.
+        # Both matrices are linear in their coefficient, so a solver run
+        # at a different (D, k) only needs a scalar rescale — see
+        # core.estimator.
+        assembly_D=D,
+        assembly_k=k,
     )

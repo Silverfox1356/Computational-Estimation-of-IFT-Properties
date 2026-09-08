@@ -21,21 +21,26 @@ Changes in this revision
 """
 
 import cv2
+import sys
 import time
+import shutil
 import numpy as np
 import pyqtgraph as pg
+from pathlib import Path
 from PyQt6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QPushButton,
                              QLabel, QFileDialog, QMessageBox, QComboBox,
                              QGroupBox, QRadioButton, QGraphicsView,
                              QGraphicsScene, QGraphicsPixmapItem,
                              QGraphicsRectItem, QGraphicsLineItem,
                              QGraphicsEllipseItem, QGraphicsPathItem,
-                             QInputDialog, QFrame, QScrollArea)
-from PyQt6.QtCore import Qt, QTimer, pyqtSignal, QThread, QRectF
+                             QInputDialog, QFrame, QScrollArea,
+                             QFormLayout, QLineEdit, QProgressBar,
+                             QApplication)
+from PyQt6.QtCore import Qt, QTimer, pyqtSignal, QThread, QRectF, QProcess
 from PyQt6.QtGui import (QImage, QPixmap, QPainter, QWheelEvent, QMouseEvent,
-                         QPen, QBrush, QColor, QPainterPath)
+                         QPen, QBrush, QColor, QPainterPath, QDoubleValidator)
 
-from core.image_processing import attempt_auto_calibration, attempt_auto_baseline
+from core.image_processing import attempt_auto_baseline
 from core.pendant_calcs import extract_pendant_edges
 from core.physics_calcs import (calculate_physics, compute_worthington,
                                 yl_profile)
@@ -43,6 +48,9 @@ from core.domain_builder import contour_to_domain
 from core.mesh_generator import generate_mesh
 from core.fem_assembly import assemble_fem_system
 from core.time_solver import solve_diffusion
+from core.estimator import estimate_D_k_yang, EstimationCancelled
+from core.calibration import (install_calibration, clear_active_calibration,
+                              CalibrationError, ACTIVE_CALIBRATION_PATH)
 from core.camera_handler import CameraHandler
 from gui.settings_dialog import SettingsDialog
 from gui.threshold_dialog import ThresholdDialog
@@ -52,6 +60,10 @@ from gui.fem_window import FEMWindow
 from gui.solver_window import SolverWindow
 from gui.styles import (DARK_STYLESHEET, BTN_PRIMARY, BTN_SUCCESS, BTN_DANGER,
                         BTN_ICON, make_cosmetic_pen, make_pixel_pen)
+
+# Downloadable blank template the user fills in and re-uploads.
+CALIB_TEMPLATE_PATH = (
+    Path(__file__).resolve().parent.parent / 'data' / 'calibration_template.csv')
 
 
 # Overlay colors
@@ -110,6 +122,100 @@ class AnalysisWorker(QThread):
 
     def stop(self):
         self.running = False
+
+
+class SimulationCancelled(Exception):
+    """Raised inside the progress callback to unwind a cancelled run."""
+
+
+class SimulationWorker(QThread):
+    """Runs solve_diffusion off the UI thread so the window stays responsive."""
+
+    progress    = pyqtSignal(int, int)   # (step, n_steps)
+    finished_ok = pyqtSignal(dict)       # sim result dict
+    failed      = pyqtSignal(str)        # error message
+    cancelled   = pyqtSignal()
+
+    def __init__(self, fem_results, domain_metadata, dtau, total_time,
+                 calibration=None):
+        super().__init__()
+        self.fem_results     = fem_results
+        self.domain_metadata = domain_metadata
+        self.dtau            = dtau
+        self.total_time      = total_time
+        self.calibration     = calibration
+        self._cancel         = False
+
+    def cancel(self):
+        self._cancel = True
+
+    def _on_progress(self, step, n_steps, C, Cs):
+        # Runs on the worker thread: only read a flag and emit signals here,
+        # never touch Qt widgets directly.
+        if self._cancel:
+            raise SimulationCancelled()
+        # Throttle to ~200 UI updates total, regardless of step count.
+        if step % max(1, n_steps // 200) == 0 or step == n_steps:
+            self.progress.emit(step, n_steps)
+
+    def run(self):
+        try:
+            sim = solve_diffusion(
+                self.fem_results, self.domain_metadata,
+                D=1e-9, k=1e-5, theta=0.7,
+                dtau=self.dtau, total_time=self.total_time,
+                progress_cb=self._on_progress,
+                calibration=self.calibration,
+            )
+            self.finished_ok.emit(sim)
+        except SimulationCancelled:
+            self.cancelled.emit()
+        except Exception as e:
+            self.failed.emit(str(e))
+
+
+class EstimationWorker(QThread):
+    """Runs estimate_D_k_yang off the UI thread — the nested kD sweep runs
+    hundreds of forward simulations and must not freeze the window."""
+
+    finished_ok = pyqtSignal(dict)       # estimate_D_k_yang result dict
+    failed      = pyqtSignal(str)
+    cancelled   = pyqtSignal()
+
+    def __init__(self, fem_results, domain_metadata, t_exp, gamma_exp,
+                 calibration=None, kD_range=None, D_bounds=None,
+                 auto_widen=True):
+        super().__init__()
+        self.fem_results     = fem_results
+        self.domain_metadata = domain_metadata
+        self.t_exp           = t_exp
+        self.gamma_exp       = gamma_exp
+        self.calibration     = calibration
+        self.kD_range        = kD_range
+        self.D_bounds        = D_bounds
+        self.auto_widen      = auto_widen
+        self._cancel         = False
+
+    def cancel(self):
+        """Ask the sweep to stop.  Checked before each forward simulation,
+        so the thread unwinds within one sim rather than running to
+        completion — a full sweep is minutes of work."""
+        self._cancel = True
+
+    def run(self):
+        try:
+            result = estimate_D_k_yang(
+                self.fem_results, self.domain_metadata,
+                self.t_exp, self.gamma_exp,
+                calibration=self.calibration,
+                kD_range=self.kD_range, D_bounds=self.D_bounds,
+                auto_widen=self.auto_widen,
+                should_cancel=lambda: self._cancel)
+            self.finished_ok.emit(result)
+        except EstimationCancelled:
+            self.cancelled.emit()
+        except Exception as e:
+            self.failed.emit(str(e))
 
 
 # =============================================================================
@@ -254,7 +360,8 @@ class PendantWindow(QWidget):
         # --- state ----------------------------------------------------
         self.capture = None
         self.live_camera = CameraHandler(camera_type)
-        self.timer = QTimer(); self.timer.timeout.connect(self.update_frame)
+        self.timer = QTimer()
+        self.timer.timeout.connect(self.update_frame)
         self.current_raw_image = None
         self.is_video_file = False
 
@@ -280,6 +387,13 @@ class PendantWindow(QWidget):
         self._baseline_overlay = None
 
         self.worker = None
+        self.sim_worker = None
+        self.est_worker = None
+        # Time grid the last fit ran on (QC-filtered), for the overlay plot.
+        self._est_t_exp = np.array([])
+        # Concentration→IFT calibration (None = placeholder linear model).
+        # Set by uploading a filled template; see the Calibration box.
+        self.calibration = None
         self.time_data, self.ift_data, self.ift_err, self.qc_flags = [], [], [], []
         self.last_grab_time = -999.0
         self.ts_start_wall_time = 0
@@ -326,6 +440,11 @@ class PendantWindow(QWidget):
             "Physical parameters and measurement tolerances")
         self.btn_settings.setStyleSheet(BTN_ICON)
         mode_row.addWidget(self.btn_settings)
+        self.btn_restart = QPushButton("⟳")
+        self.btn_restart.setFixedWidth(40)
+        self.btn_restart.setToolTip("Restart the application (fresh state)")
+        self.btn_restart.setStyleSheet(BTN_ICON)
+        mode_row.addWidget(self.btn_restart)
         mode_box = QGroupBox("Analysis mode")
         mode_box.setLayout(mode_row)
         right_panel.addWidget(mode_box)
@@ -400,7 +519,8 @@ class PendantWindow(QWidget):
 
         # Step 3 · Analyze + results
         self.box_analyze = QGroupBox("Step 3 · Analyze")
-        l_analyze = QVBoxLayout(); l_analyze.setSpacing(6)
+        l_analyze = QVBoxLayout()
+        l_analyze.setSpacing(6)
 
         h_analyze_btns = QHBoxLayout()
         self.btn_analyze_static = QPushButton("Calculate IFT")
@@ -414,7 +534,8 @@ class PendantWindow(QWidget):
         # Results card
         self.results_card = QFrame(objectName="card")
         rc = QVBoxLayout(self.results_card)
-        rc.setContentsMargins(12, 10, 12, 10); rc.setSpacing(3)
+        rc.setContentsMargins(12, 10, 12, 10)
+        rc.setSpacing(3)
 
         self.lbl_sigma_big = QLabel("—")
         self.lbl_sigma_big.setStyleSheet(
@@ -487,19 +608,137 @@ class PendantWindow(QWidget):
         self.box_fem.setEnabled(False)
         right_panel.addWidget(self.box_fem)
 
+        # Calibration curve (concentration → IFT).  Optional: without it
+        # the solver uses a crude linear γ(Cs) placeholder.
+        self.box_calib = QGroupBox("Calibration curve (concentration → IFT)")
+        l_cal = QVBoxLayout()
+
+        cal_head = QHBoxLayout()
+        self.btn_calib_download = QPushButton("⬇  Download template")
+        self.btn_calib_upload   = QPushButton("⬆  Upload calibration")
+        self.btn_calib_upload.setStyleSheet(BTN_PRIMARY)
+        self.btn_calib_clear = QPushButton("Clear")
+        self.btn_calib_clear.setToolTip(
+            "Forget the loaded calibration — reverts to the placeholder model")
+        self.btn_calib_help = QPushButton("?")
+        self.btn_calib_help.setCheckable(True)
+        self.btn_calib_help.setFixedWidth(30)
+        self.btn_calib_help.setStyleSheet(BTN_ICON)
+        self.btn_calib_help.setToolTip("Show / hide instructions")
+        cal_head.addWidget(self.btn_calib_download)
+        cal_head.addWidget(self.btn_calib_upload)
+        cal_head.addWidget(self.btn_calib_clear)
+        cal_head.addWidget(self.btn_calib_help)
+        l_cal.addLayout(cal_head)
+
+        # Click-to-toggle instructions (no hover), hidden until '?' is on.
+        self.lbl_calib_help = QLabel(
+            "<b>How to supply a calibration curve</b><br>"
+            "1. <b>Download template</b> and open it in any spreadsheet.<br>"
+            "2. Under the <tt>concentration,ift</tt> header, enter your "
+            "equilibrium points — one per row, concentration increasing. "
+            "First row = clean surface (highest IFT), last row = saturated "
+            "(lowest IFT).<br>"
+            "3. <b>concentration_unit</b>: any unit, as long as "
+            "<tt>c_sat</tt> uses the same one. IFT is mN/m.<br>"
+            "4. <b>c_sat</b>: leave blank to use your last row as the "
+            "saturation concentration, or type a value to override it.<br>"
+            "5. Save as CSV and press <b>Upload calibration</b>.")
+        self.lbl_calib_help.setWordWrap(True)
+        self.lbl_calib_help.setTextFormat(Qt.TextFormat.RichText)
+        self.lbl_calib_help.setStyleSheet(
+            "background:#171a26; border:1px solid #343852; border-radius:6px;"
+            "padding:8px; color:#c3c8dc;")
+        self.lbl_calib_help.setVisible(False)
+        l_cal.addWidget(self.lbl_calib_help)
+
+        self.lbl_calib_status = QLabel(
+            "No curve loaded — using placeholder linear γ(Cs) model.")
+        self.lbl_calib_status.setWordWrap(True)
+        self.lbl_calib_status.setStyleSheet("color:#9aa3b8;")
+        l_cal.addWidget(self.lbl_calib_status)
+
+        self.box_calib.setLayout(l_cal)
+        right_panel.addWidget(self.box_calib)
+
         # Step 7 · Simulation
         self.box_sim = QGroupBox("Step 7 · Simulation")
         l_sim = QVBoxLayout()
+        fv = QDoubleValidator(0.0001, 1e6, 6)
+        form_sim = QFormLayout()
+        self.sim_duration_input = QLineEdit("10")
+        self.sim_duration_input.setValidator(fv)
+        self.sim_dtau_input = QLineEdit("0.01")
+        self.sim_dtau_input.setValidator(fv)
+        form_sim.addRow("Simulated duration (min):", self.sim_duration_input)
+        form_sim.addRow("Time step Δt (s):", self.sim_dtau_input)
+        l_sim.addLayout(form_sim)
         self.btn_run_sim = QPushButton("▶  Run Simulation")
         self.btn_run_sim.setStyleSheet(BTN_SUCCESS)
+        self.sim_progress = QProgressBar()
+        self.sim_progress.setRange(0, 100)
+        self.sim_progress.setVisible(False)
         self.lbl_sim_status = QLabel("Assemble FEM first.")
         self.lbl_sim_status.setWordWrap(True)
         self.lbl_sim_status.setStyleSheet("color:#9aa3b8;")
         l_sim.addWidget(self.btn_run_sim)
+        l_sim.addWidget(self.sim_progress)
         l_sim.addWidget(self.lbl_sim_status)
         self.box_sim.setLayout(l_sim)
         self.box_sim.setEnabled(False)
         right_panel.addWidget(self.box_sim)
+
+        # Step 8 · Parameter estimation (inverse problem)
+        self.box_est = QGroupBox("Step 8 · Estimate D, k")
+        l_est = QVBoxLayout()
+
+        # Search-range mode: Auto (wide general defaults, auto-widened) vs
+        # Manual (user pins the D and kD ranges for a system they know).
+        range_row = QHBoxLayout()
+        self.radio_range_auto = QRadioButton("Auto range")
+        self.radio_range_manual = QRadioButton("Manual range")
+        self.radio_range_auto.setChecked(True)
+        self.radio_range_auto.setToolTip(
+            "Wide, system-agnostic search that auto-widens if the minimum "
+            "hits an edge. Recommended when you don't know D/kD magnitudes.")
+        self.radio_range_manual.setToolTip(
+            "Pin the D and kD search ranges yourself (no auto-widening).")
+        range_row.addWidget(self.radio_range_auto)
+        range_row.addWidget(self.radio_range_manual)
+        range_row.addStretch(1)
+        l_est.addLayout(range_row)
+
+        # Manual range inputs — hidden unless Manual is selected.
+        self.manual_range_box = QWidget()
+        mr = QFormLayout(self.manual_range_box)
+        mr.setContentsMargins(0, 4, 0, 4)
+        fv_pos = QDoubleValidator(0.0, 1e12, 15)
+        self.in_D_min  = QLineEdit("1e-11")
+        self.in_D_min.setValidator(fv_pos)
+        self.in_D_max  = QLineEdit("1e-8")
+        self.in_D_max.setValidator(fv_pos)
+        self.in_kD_min = QLineEdit("0.01")
+        self.in_kD_min.setValidator(fv_pos)
+        self.in_kD_max = QLineEdit("100")
+        self.in_kD_max.setValidator(fv_pos)
+        mr.addRow("D min (m²/s):", self.in_D_min)
+        mr.addRow("D max (m²/s):", self.in_D_max)
+        mr.addRow("kD min:", self.in_kD_min)
+        mr.addRow("kD max:", self.in_kD_max)
+        self.manual_range_box.setVisible(False)
+        l_est.addWidget(self.manual_range_box)
+
+        self.btn_estimate = QPushButton("⇆  Fit D, k to measured IFT")
+        self.btn_estimate.setStyleSheet(BTN_PRIMARY)
+        self.lbl_est_status = QLabel(
+            "Needs FEM (Step 6) + a time-series IFT curve (Step 3).")
+        self.lbl_est_status.setWordWrap(True)
+        self.lbl_est_status.setStyleSheet("color:#9aa3b8;")
+        l_est.addWidget(self.btn_estimate)
+        l_est.addWidget(self.lbl_est_status)
+        self.box_est.setLayout(l_est)
+        self.box_est.setEnabled(False)
+        right_panel.addWidget(self.box_est)
 
         # Plot
         pg.setConfigOption('background', '#0f1018')
@@ -510,6 +749,9 @@ class PendantWindow(QWidget):
         self.graph_widget.showGrid(x=True, y=True, alpha=0.25)
         self.plot_line = self.graph_widget.plot(
             [], [], pen=pg.mkPen(color='#8ab4ff', width=2))
+        self.plot_fit_line = self.graph_widget.plot(
+            [], [], pen=pg.mkPen(color='#ffd166', width=2,
+                                 style=Qt.PenStyle.DashLine))
         self.plot_pts_pass = pg.ScatterPlotItem(
             size=7, pen=pg.mkPen(None), brush=pg.mkBrush('#4fd07b'))
         self.plot_pts_fail = pg.ScatterPlotItem(
@@ -546,6 +788,13 @@ class PendantWindow(QWidget):
         self.btn_generate_mesh.clicked.connect(self.run_meshing)
         self.btn_run_fem.clicked.connect(self.run_fem)
         self.btn_run_sim.clicked.connect(self.run_simulation)
+        self.btn_estimate.clicked.connect(self.run_estimation)
+        self.btn_calib_download.clicked.connect(self.download_calib_template)
+        self.btn_calib_upload.clicked.connect(self.upload_calibration)
+        self.btn_calib_clear.clicked.connect(self.reset_calibration)
+        self.btn_calib_help.toggled.connect(self.lbl_calib_help.setVisible)
+        self.btn_restart.clicked.connect(self.restart_application)
+        self.radio_range_manual.toggled.connect(self.manual_range_box.setVisible)
 
         self.switch_mode()
 
@@ -635,11 +884,13 @@ class PendantWindow(QWidget):
         h = QGraphicsLineItem(ax - ch_len + 0.5, ay + 0.5,
                               ax + ch_len + 0.5, ay + 0.5)
         h.setPen(make_cosmetic_pen(_COL_APEX))
-        scene.addItem(h); self._result_overlays.append(h)
+        scene.addItem(h)
+        self._result_overlays.append(h)
         v = QGraphicsLineItem(ax + 0.5, ay - ch_len + 0.5,
                               ax + 0.5, ay + ch_len + 0.5)
         v.setPen(make_cosmetic_pen(_COL_APEX))
-        scene.addItem(v); self._result_overlays.append(v)
+        scene.addItem(v)
+        self._result_overlays.append(v)
 
     # =========================================================================
     # UI helpers
@@ -648,12 +899,16 @@ class PendantWindow(QWidget):
         self.stop_camera()
         self.clear_guide()
         if self.radio_static.isChecked():
-            self.btn_upload_img.show(); self.btn_upload_vid.hide()
-            self.btn_analyze_static.show(); self.btn_analyze_time.hide()
+            self.btn_upload_img.show()
+            self.btn_upload_vid.hide()
+            self.btn_analyze_static.show()
+            self.btn_analyze_time.hide()
             self.graph_widget.hide()
         else:
-            self.btn_upload_img.hide(); self.btn_upload_vid.show()
-            self.btn_analyze_static.hide(); self.btn_analyze_time.show()
+            self.btn_upload_img.hide()
+            self.btn_upload_vid.show()
+            self.btn_analyze_static.hide()
+            self.btn_analyze_time.show()
             self.graph_widget.show()
 
     def open_settings(self):
@@ -674,7 +929,8 @@ class PendantWindow(QWidget):
 
     def start_crop(self):
         self.image_label.set_mode('crop')
-        self.btn_apply_crop.show(); self.btn_crop.hide()
+        self.btn_apply_crop.show()
+        self.btn_crop.hide()
 
     def apply_crop(self):
         rect = self.image_label.get_crop_rect()
@@ -686,7 +942,8 @@ class PendantWindow(QWidget):
                 x1, x2 = max(0, x), min(W, x + w)
                 cropped = self.current_raw_image[y1:y2, x1:x2]
                 self.setup_image_for_analysis(cropped)
-        self.btn_apply_crop.hide(); self.btn_crop.show()
+        self.btn_apply_crop.hide()
+        self.btn_crop.show()
         self.image_label.set_mode('idle')
 
     def open_threshold_dialog(self):
@@ -855,7 +1112,8 @@ class PendantWindow(QWidget):
         if self.worker is not None and self.worker.running:
             self.toggle_time_series()
         if self.capture is not None:
-            self.capture.release(); self.capture = None
+            self.capture.release()
+            self.capture = None
         self.live_camera.stop()
         self.btn_capture.hide()
         self.btn_camera.setText("Start live camera")
@@ -1070,7 +1328,9 @@ class PendantWindow(QWidget):
             self.box_calib.setEnabled(False)
             self.box_base.setEnabled(False)
         else:
-            self.worker.stop(); self.worker.wait(); self.worker = None
+            self.worker.stop()
+            self.worker.wait()
+            self.worker = None
             if self.is_video_file:
                 self.timer.stop()
             self.btn_analyze_time.setText("▶  Start time series")
@@ -1087,7 +1347,8 @@ class PendantWindow(QWidget):
         self.ift_err.append(dift)
         self.qc_flags.append(qc)
 
-        x = np.array(self.time_data); y = np.array(self.ift_data)
+        x = np.array(self.time_data)
+        y = np.array(self.ift_data)
         e = np.array(self.ift_err)
         flags = np.array(self.qc_flags, dtype=bool)
         self.plot_line.setData(x, y)
@@ -1315,12 +1576,16 @@ class PendantWindow(QWidget):
                 parent=None)
             self._fem_window.show()
 
-            # Enable simulation
+            # Enable simulation + parameter estimation
             self.box_sim.setEnabled(True)
             self.lbl_sim_status.setText(
                 "FEM ready. Click to run simulation.")
             self.lbl_sim_status.setStyleSheet(
                 "color:#4fd07b; font-weight:600;")
+            self.box_est.setEnabled(True)
+            self.lbl_est_status.setText(
+                "Ready. Fits the forward model to the measured IFT curve.")
+            self.lbl_est_status.setStyleSheet("color:#4fd07b;")
 
         except Exception as e:
             self.lbl_fem_status.setText(f"FEM failed: {e}")
@@ -1333,53 +1598,310 @@ class PendantWindow(QWidget):
     # =========================================================================
     # Forward Simulation
     # =========================================================================
+    # =========================================================================
+    # Calibration curve
+    # =========================================================================
+    def download_calib_template(self):
+        """Save a blank template for the user to fill in."""
+        dest, _ = QFileDialog.getSaveFileName(
+            self, "Save calibration template",
+            "calibration_template.csv", "CSV files (*.csv)")
+        if not dest:
+            return
+        try:
+            shutil.copyfile(CALIB_TEMPLATE_PATH, dest)
+        except OSError as e:
+            QMessageBox.critical(self, "Could not save template", str(e))
+            return
+        self.lbl_calib_status.setText(
+            f"Template saved to {dest} — fill it in, then Upload.")
+        self.lbl_calib_status.setStyleSheet("color:#8ab4ff;")
+
+    def upload_calibration(self):
+        """Validate a filled template and, only if it fully passes, make
+        it the active calibration.  A rejected or failed file leaves the
+        previously-loaded calibration untouched (all-or-nothing)."""
+        src, _ = QFileDialog.getOpenFileName(
+            self, "Upload calibration curve", "",
+            "CSV files (*.csv);;All files (*)")
+        if not src:
+            return
+        try:
+            # Commits to the single canonical file only on full success.
+            calibration, warnings = install_calibration(src)
+        except CalibrationError as e:
+            # Prior self.calibration is deliberately left as-is.
+            QMessageBox.warning(self, "Calibration not loaded", str(e))
+            return
+        except Exception as e:                       # unexpected — stay safe
+            QMessageBox.critical(self, "Calibration error", str(e))
+            return
+
+        self.calibration = calibration
+        n = len(calibration.c_points)
+        self.lbl_calib_status.setText(
+            f"✓ Calibration loaded: {n} points, "
+            f"c_sat = {calibration.c_sat:g}, "
+            f"γ {calibration.gamma0:g} → {calibration.gamma_inf:g} mN/m. "
+            f"Steps 7 & 8 will use it.")
+        self.lbl_calib_status.setStyleSheet("color:#4fd07b; font-weight:600;")
+        if warnings:
+            QMessageBox.information(
+                self, "Calibration loaded (with notes)",
+                "The curve was accepted. Please check:\n\n• "
+                + "\n• ".join(warnings))
+
+    def reset_calibration(self):
+        """Forget the loaded calibration — in memory and on disk — so no
+        stale curve can leak into a later run.  Reverts Steps 7 & 8 to the
+        placeholder linear γ(Cs) model.  Confirms first, since the curve
+        must then be re-uploaded."""
+        if self.calibration is None and not ACTIVE_CALIBRATION_PATH.exists():
+            return                          # nothing to clear
+        if QMessageBox.question(
+                self, "Clear calibration?",
+                "This deletes the loaded calibration curve (both in memory "
+                "and the saved copy). Steps 7 & 8 will fall back to the "
+                "placeholder linear model, and you will have to upload the "
+                "CSV again to use a calibration.\n\nClear it now?"
+                ) != QMessageBox.StandardButton.Yes:
+            return
+        self.calibration = None
+        clear_active_calibration()          # remove the canonical file too
+        self.lbl_calib_status.setText(
+            "No curve loaded — using placeholder linear γ(Cs) model.")
+        self.lbl_calib_status.setStyleSheet("color:#9aa3b8;")
+
+    def restart_application(self):
+        """Relaunch the whole application with a clean state.
+
+        Spawns a fresh process from the current interpreter/argv, then
+        quits this one.  A running fit/simulation would be abandoned, so
+        confirm first."""
+        if QMessageBox.question(
+                self, "Restart application?",
+                "This closes the current window and starts a fresh one. "
+                "Any unsaved work and in-progress runs will be lost.\n\n"
+                "Continue?") != QMessageBox.StandardButton.Yes:
+            return
+        # startDetached launches the new process independently of this one;
+        # it is up and running before we tell the old app to quit.
+        QProcess.startDetached(sys.executable, sys.argv)
+        QApplication.quit()
+
     def run_simulation(self):
-        """Run forward diffusion simulation."""
+        """Start (or cancel) the forward diffusion simulation."""
+        # A second click while running acts as Cancel.
+        if self.sim_worker is not None and self.sim_worker.isRunning():
+            self.sim_worker.cancel()
+            self.btn_run_sim.setEnabled(False)
+            self.lbl_sim_status.setText("⏳ Cancelling…")
+            self.lbl_sim_status.setStyleSheet("color:#8ab4ff; font-weight:600;")
+            return
+
         if not hasattr(self, 'fem_results') or self.fem_results is None:
             QMessageBox.warning(self, "No FEM",
                                 "Assemble FEM matrices first (Step 6).")
             return
-        self.lbl_sim_status.setText("⏳ Running simulation…")
-        self.lbl_sim_status.setStyleSheet("color:#8ab4ff; font-weight:600;")
-        self.btn_run_sim.setEnabled(False)
-        from PyQt6.QtWidgets import QApplication
-        QApplication.processEvents()
 
         try:
-            sim = solve_diffusion(
-                self.fem_results,
-                self.domain_metadata,
-                D=1e-9,
-                k=1e-5,
-                theta=0.7,
-                dtau=0.01,
-                n_steps=100,
-            )
+            duration_min = float(self.sim_duration_input.text())
+            dtau = float(self.sim_dtau_input.text())
+            if duration_min <= 0 or dtau <= 0:
+                raise ValueError("Duration and Δt must be positive.")
+        except ValueError:
+            QMessageBox.warning(self, "Invalid input",
+                                "Enter positive numbers for duration and Δt.")
+            return
 
-            self.sim_results = sim
+        self.sim_progress.setValue(0)
+        self.sim_progress.setVisible(True)
+        self.lbl_sim_status.setText("⏳ Running simulation…")
+        self.lbl_sim_status.setStyleSheet("color:#8ab4ff; font-weight:600;")
+        self.btn_run_sim.setText("■  Cancel")
+        self.btn_run_sim.setStyleSheet(BTN_DANGER)
 
-            Cs_final = sim['Cs_history'][-1]
-            gamma_final = sim['gamma_history'][-1]
-            self.lbl_sim_status.setText(
-                f"✓ Simulation complete (100 steps)\n"
-                f"  Cs = {Cs_final:.4f}  γ = {gamma_final:.1f} mN/m")
-            self.lbl_sim_status.setStyleSheet(
-                "color:#4fd07b; font-weight:600;")
+        self.sim_worker = SimulationWorker(
+            self.fem_results, self.domain_metadata,
+            dtau=dtau, total_time=duration_min * 60.0,
+            calibration=self.calibration)
+        self.sim_worker.progress.connect(self._on_sim_progress)
+        self.sim_worker.finished_ok.connect(self._on_sim_finished)
+        self.sim_worker.failed.connect(self._on_sim_failed)
+        self.sim_worker.cancelled.connect(self._on_sim_cancelled)
+        self.sim_worker.start()
 
-            self._solver_window = SolverWindow(
-                sim, self.domain_metadata, parent=None)
-            self._solver_window.show()
+    def _reset_sim_ui(self):
+        self.btn_run_sim.setText("▶  Run Simulation")
+        self.btn_run_sim.setStyleSheet(BTN_SUCCESS)
+        self.btn_run_sim.setEnabled(True)
+        self.sim_progress.setVisible(False)
+        self.sim_worker = None
 
-        except Exception as e:
-            self.lbl_sim_status.setText(f"Simulation failed: {e}")
-            self.lbl_sim_status.setStyleSheet(
-                "color:#ff6a4d; font-weight:600;")
-            QMessageBox.critical(self, "Simulation Error", str(e))
-        finally:
-            self.btn_run_sim.setEnabled(True)
+    def _on_sim_progress(self, step, n_steps):
+        self.sim_progress.setValue(int(100 * step / n_steps))
+
+    def _on_sim_finished(self, sim):
+        self.sim_results = sim
+        Cs_final = sim['Cs_history'][-1]
+        gamma_final = sim['gamma_history'][-1]
+        self.lbl_sim_status.setText(
+            f"✓ Simulation complete ({sim['n_steps']} steps, "
+            f"{sim['actual_time']/60.0:.2f} min simulated)\n"
+            f"  Cs = {Cs_final:.4f}  γ = {gamma_final:.1f} mN/m")
+        self.lbl_sim_status.setStyleSheet("color:#4fd07b; font-weight:600;")
+        self._reset_sim_ui()
+        self._solver_window = SolverWindow(
+            sim, self.domain_metadata, parent=None)
+        self._solver_window.show()
+
+    def _on_sim_failed(self, message):
+        self.lbl_sim_status.setText(f"Simulation failed: {message}")
+        self.lbl_sim_status.setStyleSheet("color:#ff6a4d; font-weight:600;")
+        QMessageBox.critical(self, "Simulation Error", message)
+        self._reset_sim_ui()
+
+    def _on_sim_cancelled(self):
+        self.lbl_sim_status.setText("Simulation cancelled.")
+        self.lbl_sim_status.setStyleSheet("color:#9aa3b8;")
+        self._reset_sim_ui()
+
+    # =========================================================================
+    # Parameter estimation (inverse problem)
+    # =========================================================================
+    # Minimum number of usable (QC-passed) points the fit needs.
+    MIN_FIT_POINTS = 10
+
+    def _fit_input_data(self):
+        """Measured curve restricted to points the fit can actually use.
+
+        Drops QC-failed measurements and any non-positive / non-finite IFT:
+        a failed drop-shape fit can report γ ≤ 0, and the default objective
+        (Yang eq 14) divides by γ, so a single such point poisons every
+        residual.  Returns ``(t, gamma, n_dropped)``.
+        """
+        t = np.asarray(self.time_data, dtype=float)
+        g = np.asarray(self.ift_data, dtype=float)
+        qc = np.asarray(self.qc_flags, dtype=bool)
+        keep = qc & np.isfinite(g) & (g > 0.0) & np.isfinite(t)
+        return t[keep], g[keep], int(np.sum(~keep))
+
+    def run_estimation(self):
+        """Start (or cancel) the (D, k) fit against the measured IFT curve."""
+        # A second click while running acts as Cancel.
+        if self.est_worker is not None and self.est_worker.isRunning():
+            self.est_worker.cancel()
+            self.btn_estimate.setEnabled(False)
+            self.lbl_est_status.setText("⏳ Cancelling…")
+            self.lbl_est_status.setStyleSheet("color:#8ab4ff; font-weight:600;")
+            return
+
+        if not hasattr(self, 'fem_results') or self.fem_results is None:
+            QMessageBox.warning(self, "No FEM",
+                                "Assemble FEM matrices first (Step 6).")
+            return
+
+        # Fit only QC-passed points — see _fit_input_data.
+        t_exp, gamma_exp, n_dropped = self._fit_input_data()
+        if len(t_exp) < self.MIN_FIT_POINTS:
+            QMessageBox.warning(
+                self, "Not enough usable data",
+                f"The fit needs at least {self.MIN_FIT_POINTS} QC-passed "
+                f"points from the time-series analysis (Step 3).\n\n"
+                f"Measured: {len(self.time_data)}   "
+                f"usable: {len(t_exp)}   discarded: {n_dropped}.")
+            return
+
+        # Search-range mode: Auto (general defaults + auto-widen) or Manual.
+        if self.radio_range_manual.isChecked():
+            try:
+                D_lo = float(self.in_D_min.text())
+                D_hi = float(self.in_D_max.text())
+                kD_lo = float(self.in_kD_min.text())
+                kD_hi = float(self.in_kD_max.text())
+            except ValueError:
+                QMessageBox.warning(self, "Invalid range",
+                                    "Enter numbers for all four range fields.")
+                return
+            if not (0 < D_lo < D_hi) or not (0 < kD_lo < kD_hi):
+                QMessageBox.warning(
+                    self, "Invalid range",
+                    "Each range needs 0 < min < max (D and kD).")
+                return
+            kD_range, D_bounds, auto_widen = (kD_lo, kD_hi), (D_lo, D_hi), False
+        else:
+            kD_range, D_bounds, auto_widen = None, None, True
+
+        # γ_fit comes back on this grid, so keep it for the overlay plot.
+        self._est_t_exp = t_exp
+
+        dropped = (f", {n_dropped} QC-failed point(s) discarded"
+                   if n_dropped else "")
+        self.btn_estimate.setText("■  Cancel")
+        self.btn_estimate.setStyleSheet(BTN_DANGER)
+        self.lbl_est_status.setText(
+            f"⏳ Fitting {len(t_exp)} points{dropped}… "
+            f"(runs many forward sims)")
+        self.lbl_est_status.setStyleSheet("color:#8ab4ff; font-weight:600;")
+
+        self.est_worker = EstimationWorker(
+            self.fem_results, self.domain_metadata, t_exp, gamma_exp,
+            calibration=self.calibration,
+            kD_range=kD_range, D_bounds=D_bounds, auto_widen=auto_widen)
+        self.est_worker.finished_ok.connect(self._on_est_finished)
+        self.est_worker.failed.connect(self._on_est_failed)
+        self.est_worker.cancelled.connect(self._on_est_cancelled)
+        self.est_worker.start()
+
+    def _reset_est_ui(self):
+        self.btn_estimate.setText("⇆  Fit D, k to measured IFT")
+        self.btn_estimate.setStyleSheet(BTN_PRIMARY)
+        self.btn_estimate.setEnabled(True)
+        self.est_worker = None
+
+    def _on_est_finished(self, result):
+        status = "✓" if result['success'] else "⚠"
+        n_sims = result['n_evaluations'] + result.get('n_scan_evaluations', 0)
+        self.lbl_est_status.setText(
+            f"{status} D = {result['D']:.3e} m²/s\n"
+            f"   k = {result['k']:.3e} m/s\n"
+            f"   kD = {result['kD']:.3f}  (Biot number)\n"
+            f"   E = {result['E_percent']:.2f} %  (Yang eq 14 minimum)\n"
+            f"   RMS misfit {result['residual_rms']:.3f} mN/m "
+            f"({n_sims} simulations)\n"
+            f"   {result['message']}")
+        self.lbl_est_status.setStyleSheet(
+            f"color:{'#4fd07b' if result['success'] else '#ff9f5a'};"
+            f" font-weight:600;")
+        # Overlay the fitted curve on the measured IFT plot.  Plot against
+        # the grid the fit actually used, not the full measured series —
+        # QC-failed points were dropped, so the lengths differ.
+        self.plot_fit_line.setData(self._est_t_exp, result['gamma_fit'])
+        self._reset_est_ui()
+
+    def _on_est_failed(self, message):
+        self.lbl_est_status.setText(f"Estimation failed: {message}")
+        self.lbl_est_status.setStyleSheet("color:#ff6a4d; font-weight:600;")
+        QMessageBox.critical(self, "Estimation Error", message)
+        self._reset_est_ui()
+
+    def _on_est_cancelled(self):
+        self.lbl_est_status.setText("Estimation cancelled.")
+        self.lbl_est_status.setStyleSheet("color:#9aa3b8;")
+        self._reset_est_ui()
 
     def closeEvent(self, event):
         self.stop_camera()
         if self.worker is not None:
-            self.worker.stop(); self.worker.wait()
+            self.worker.stop()
+            self.worker.wait()
+        # Cancel before waiting: both workers poll a flag between forward
+        # simulations, so they unwind in ~one sim.  Waiting without
+        # cancelling would block the close for the whole run (minutes).
+        if self.sim_worker is not None and self.sim_worker.isRunning():
+            self.sim_worker.cancel()
+            self.sim_worker.wait()
+        if self.est_worker is not None and self.est_worker.isRunning():
+            self.est_worker.cancel()
+            self.est_worker.wait()
         event.accept()
