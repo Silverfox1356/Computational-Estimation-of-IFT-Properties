@@ -51,6 +51,7 @@ from core.time_solver import solve_diffusion
 from core.estimator import estimate_D_k_yang, EstimationCancelled
 from core.calibration import (install_calibration, clear_active_calibration,
                               CalibrationError, ACTIVE_CALIBRATION_PATH)
+from core.ift_data import load_ift_curve, IFTDataError
 from core.camera_handler import CameraHandler
 from gui.settings_dialog import SettingsDialog
 from gui.threshold_dialog import ThresholdDialog
@@ -728,12 +729,21 @@ class PendantWindow(QWidget):
         self.manual_range_box.setVisible(False)
         l_est.addWidget(self.manual_range_box)
 
+        # The fit data can also come from a file — a curve from another
+        # tensiometer, or digitised from a paper — instead of Step 3.
+        self.btn_load_ift = QPushButton("📄  Load IFT curve (CSV)…")
+        self.btn_load_ift.setToolTip(
+            "Two columns: time (s), IFT (mN/m). Optional header row and "
+            "'#' comment lines. Replaces the Step-3 time series as the "
+            "data the fit uses.")
         self.btn_estimate = QPushButton("⇆  Fit D, k to measured IFT")
         self.btn_estimate.setStyleSheet(BTN_PRIMARY)
         self.lbl_est_status = QLabel(
-            "Needs FEM (Step 6) + a time-series IFT curve (Step 3).")
+            "Needs FEM (Step 6) + an IFT curve: the Step-3 time series, "
+            "or Load IFT curve (CSV).")
         self.lbl_est_status.setWordWrap(True)
         self.lbl_est_status.setStyleSheet("color:#9aa3b8;")
+        l_est.addWidget(self.btn_load_ift)
         l_est.addWidget(self.btn_estimate)
         l_est.addWidget(self.lbl_est_status)
         self.box_est.setLayout(l_est)
@@ -789,6 +799,7 @@ class PendantWindow(QWidget):
         self.btn_run_fem.clicked.connect(self.run_fem)
         self.btn_run_sim.clicked.connect(self.run_simulation)
         self.btn_estimate.clicked.connect(self.run_estimation)
+        self.btn_load_ift.clicked.connect(lambda: self.load_ift_csv())
         self.btn_calib_download.clicked.connect(self.download_calib_template)
         self.btn_calib_upload.clicked.connect(self.upload_calibration)
         self.btn_calib_clear.clicked.connect(self.reset_calibration)
@@ -1771,6 +1782,63 @@ class PendantWindow(QWidget):
     # =========================================================================
     # Minimum number of usable (QC-passed) points the fit needs.
     MIN_FIT_POINTS = 10
+
+    def load_ift_csv(self, path=None):
+        """Use an IFT-vs-time curve from a CSV file as Step 8's fit data.
+
+        For data that did not come from this app's camera/video analysis
+        (another tensiometer, or a curve digitised from a paper).  The file
+        is fully validated by ``core.ift_data.load_ift_curve`` before
+        anything is replaced, so a bad file leaves the current curve
+        untouched.  Loaded points count as QC-passed.  ``path`` skips the
+        file dialog (scripting / tests).
+        """
+        if self.worker is not None and self.worker.running:
+            QMessageBox.warning(self, "Time series running",
+                                "Stop the Step-3 time series before loading "
+                                "a file.")
+            return
+        if self.est_worker is not None and self.est_worker.isRunning():
+            QMessageBox.warning(self, "Fit running",
+                                "Wait for (or cancel) the current fit first.")
+            return
+        if path is None:
+            path, _ = QFileDialog.getOpenFileName(
+                self, "Load IFT curve", "", "CSV files (*.csv);;All files (*)")
+            if not path:
+                return
+        try:
+            data = load_ift_curve(path)
+        except IFTDataError as e:
+            QMessageBox.critical(self, "Cannot load IFT curve", str(e))
+            return
+
+        t, g = data['t'], data['gamma']
+        name = Path(path).name
+        if self.time_data:
+            reply = QMessageBox.question(
+                self, "Replace IFT curve?",
+                f"Replace the {len(self.time_data)} point(s) currently loaded "
+                f"with the {len(t)} point(s) in {name}?")
+            if reply != QMessageBox.StandardButton.Yes:
+                return
+
+        self.time_data, self.ift_data = t.tolist(), g.tolist()
+        self.ift_err = [0.0] * len(t)
+        self.qc_flags = [True] * len(t)
+        self.plot_line.setData(t, g)
+        self.plot_pts_pass.setData(t, g)
+        self.plot_pts_fail.setData([], [])
+        self.err_item.setData(x=np.array([]), y=np.array([]),
+                              top=np.array([]), bottom=np.array([]))
+        self.plot_fit_line.setData([], [])          # stale fit, if any
+
+        notes = "".join(f"\n⚠ {w}" for w in data['warnings'])
+        self.lbl_est_status.setText(
+            f"Loaded {len(t)} points from {name} "
+            f"(t = {t[0]:g}–{t[-1]:g} s, IFT {g.min():.2f}–{g.max():.2f} "
+            f"mN/m).{notes}")
+        self.lbl_est_status.setStyleSheet("color:#4fd07b; font-weight:600;")
 
     def _fit_input_data(self):
         """Measured curve restricted to points the fit can actually use.
