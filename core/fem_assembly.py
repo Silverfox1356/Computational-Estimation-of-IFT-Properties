@@ -11,7 +11,7 @@ ensure that the mesh points and domain metadata are in metres.
 Matrices produced
 -----------------
     H   – Mass matrix       (axisymmetric: includes r-weighting)
-    K   – Stiffness matrix  (diffusion + axisymmetric correction)
+    K   – Stiffness matrix  (axisymmetric: includes r-weighting)
     Kb  – Boundary mass     (Robin BC on the free surface only)
     F   – Boundary load     (Robin BC RHS)
 
@@ -94,14 +94,23 @@ def assemble_mass_matrix(points, triangles):
 
 
 # ======================================================================
-# Stiffness matrix   K :  D ∫ ∇φᵢ · ∇φⱼ r dΩ  + axisym correction
+# Stiffness matrix   K :  D ∫ ∇φᵢ · ∇φⱼ r dΩ
 # ======================================================================
 def assemble_stiffness_matrix(points, triangles, D=1.0):
     """
     Stiffness matrix with diffusion coefficient D (m²/s).
 
     K_ij += D · R_c · A · (∇φᵢ · ∇φⱼ)
-          - D · A · ∂φⱼ/∂r / 3        (axisymmetric correction)
+
+    The r-weighted form is the COMPLETE axisymmetric weak form of
+    ∇·(D∇c): integrating (1/r)∂/∂r(r ∂c/∂r) · w · r by parts already
+    yields the (1/r)∂c/∂r term.  Do not add it again as a separate
+    "axisymmetric correction" — this function once did, which counted
+    the term twice: K lost its symmetry, its columns stopped summing to
+    zero (the operator itself created mass — ~25 % of the drop's CO₂ at
+    t = 180 s in the Yang-2006 case), and the drop filled faster than
+    an exact analytical bound.  K is exactly symmetric and every row and
+    column sums to zero; tests/test_fem_conservation.py pins this down.
     """
     N = len(points)
     K = lil_matrix((N, N))
@@ -118,17 +127,12 @@ def assemble_stiffness_matrix(points, triangles, D=1.0):
         # triangles have r < 0.  The axisymmetric radius is |r| — a
         # signed mean would give those elements a NEGATIVE diffusion
         # coefficient (indefinite K, wildly parameter-sensitive
-        # solutions).  The 1/r correction term carries sign(r) instead:
-        # (1/r)∂c/∂r · |r| = sign(r)·∂c/∂r, which is mirror-consistent
-        # because ∂c/∂r also flips sign on the reflected half.
+        # solutions).
         R_c = np.mean(np.abs(r))
-        sgn = 1.0 if np.mean(r) >= 0.0 else -1.0
 
         for i in range(3):
             for j in range(3):
-                diffusion = D * R_c * A * np.dot(grads[i], grads[j])
-                axisym = -D * sgn * (A / 3.0) * grads[j, 0]
-                K[tri[i], tri[j]] += diffusion + axisym
+                K[tri[i], tri[j]] += D * R_c * A * np.dot(grads[i], grads[j])
 
     return csr_matrix(K)
 
@@ -259,11 +263,16 @@ def run_sanity_checks(H, K, Kb, F, points, interface_edges, wall_edges):
     """
     Validate the assembled FEM matrices.
 
-    Symmetry thresholds for K (which has an inherently asymmetric
-    axisymmetric correction term):
-        OK      : Frobenius(K − Kᵀ) < 1e-10
-        Warning : Frobenius(K − Kᵀ) < 1e-8
-        Fail    : otherwise
+    H and K are both exactly symmetric by construction, and K — a pure
+    diffusion operator — must have zero row AND column sums: diffusion
+    only moves mass around, it never creates or destroys it.  All three
+    are measured RELATIVE to the matrix's own size.  In SI units the
+    entries are ~1e-12 (D · r · area), so an absolute tolerance can
+    never fail; one here once passed a 4 % asymmetry as 'ok'.
+
+        symmetry      : ‖M − Mᵀ‖_F / ‖M‖_F
+                        K: ok < 1e-12, warning < 1e-9, else fail
+        conservation  : max|Σᵢ K_ij| / max|K_jj|  < 1e-10
 
     Returns
     -------
@@ -273,24 +282,35 @@ def run_sanity_checks(H, K, Kb, F, points, interface_edges, wall_edges):
     n = H.shape[0]
     total = n * n
 
+    def rel_asymmetry(M):
+        norm = float(M.power(2).sum() ** 0.5)
+        return float((M - M.T).power(2).sum() ** 0.5) / norm if norm else np.inf
+
     # ── 1. H symmetry (strict – H is exactly symmetric by construction)
-    sym_H = float((H - H.T).power(2).sum() ** 0.5)
+    sym_H = rel_asymmetry(H)
     results['H_symmetry_error'] = sym_H
     results['H_symmetric'] = sym_H < 1e-12
 
-    # ── 2. K near-symmetry (relaxed – axisymmetric term introduces
-    #       small floating-point asymmetry)
-    sym_K = float((K - K.T).power(2).sum() ** 0.5)
+    # ── 2. K symmetry (also exact by construction; the 3-tier status only
+    #       leaves room for round-off)
+    sym_K = rel_asymmetry(K)
     results['K_symmetry_error'] = sym_K
-    if sym_K < 1e-10:
+    if sym_K < 1e-12:
         results['K_symmetry_status'] = 'ok'       # green
-        results['K_near_symmetric'] = True
-    elif sym_K < 1e-8:
+        results['K_symmetric'] = True
+    elif sym_K < 1e-9:
         results['K_symmetry_status'] = 'warning'   # amber
-        results['K_near_symmetric'] = True
+        results['K_symmetric'] = True
     else:
         results['K_symmetry_status'] = 'fail'      # red
-        results['K_near_symmetric'] = False
+        results['K_symmetric'] = False
+
+    # ── 2b. K conservation – every column sums to zero, or the operator
+    #        itself is a source/sink of mass
+    K_diag_max = float(np.abs(K.diagonal()).max()) if n else 0.0
+    col_sum = float(np.abs(np.asarray(K.sum(axis=0))).max()) if n else 0.0
+    results['K_colsum_rel'] = col_sum / K_diag_max if K_diag_max else np.inf
+    results['K_conservative'] = results['K_colsum_rel'] < 1e-10
 
     # ── 3. Positive diagonal of H
     H_diag = np.array(H.diagonal())
@@ -337,7 +357,8 @@ def run_sanity_checks(H, K, Kb, F, points, interface_edges, wall_edges):
     # ── Overall pass/fail
     results['all_pass'] = all([
         results['H_symmetric'],
-        results['K_near_symmetric'],       # relaxed, not strict
+        results['K_symmetric'],
+        results['K_conservative'],
         results['H_diag_all_positive'],
         results['K_diag_positive'],
         results['sparsity_ok'],

@@ -83,7 +83,7 @@
 **Objective**: Construct the Finite Element Method (FEM) matrices for axisymmetric diffusion across the pendant-drop domain, applying appropriate boundary conditions.
 **Methodology**:
 1. **Mass Matrix ($H$)**: Computes a lumped-consistent mass matrix. For axisymmetry, each elemental contribution is weighted by the radial centroid ($R_c$).
-2. **Stiffness Matrix ($K$)**: Computes the stiffness matrix incorporating the diffusion coefficient $D$. Includes the standard diffusion term and an exact axisymmetric correction term.
+2. **Stiffness Matrix ($K$)**: Computes the stiffness matrix incorporating the diffusion coefficient $D$, using the $r$-weighted (axisymmetric) weak form $D\int \nabla\phi_i\cdot\nabla\phi_j\, r\, d\Omega$. That form already contains the $(1/r)\,\partial c/\partial r$ term, so no separate correction is added (adding one counts it twice and makes $K$ create mass). $K$ is exactly symmetric and its rows and columns sum to zero.
 3. **Boundary Classification**: Classifies mesh boundary edges geometrically into 'wall' (needle inner wall, tip step, top wall) and 'interface' (free surface).
 4. **Boundary Terms ($K_b$, $F$)**: Applies a Robin Boundary Condition *only* on the interface edges. This introduces a mass-transfer coefficient ($k$) representing the flux $-D \frac{\partial c}{\partial n} = k (c - c_\infty)$.
 **Thresholds & Parameters**:
@@ -91,8 +91,9 @@
 - $k = 10^{-5}$ m/s (Default mass-transfer coefficient).
 - Robin boundary condition assumes normalized bulk concentration $c_\infty = 1.0$.
 **Quality Checks (Sanity Checks)**:
-- **H Symmetry**: Strict symmetry of mass matrix (Frobenius error $< 10^{-12}$).
-- **K Near-Symmetry**: Stiffness matrix near-symmetry (due to axisymmetric term). Error $< 10^{-10}$ is OK, $< 10^{-8}$ is a Warning.
+- **H Symmetry**: Strict symmetry of mass matrix (relative Frobenius error $\|H-H^T\|_F/\|H\|_F < 10^{-12}$).
+- **K Symmetry**: Relative Frobenius error $< 10^{-12}$ is OK, $< 10^{-9}$ is a Warning. Tolerances are relative because the entries are $\sim 10^{-12}$ in SI units — an absolute tolerance would pass anything.
+- **K Conservation**: Every column of $K$ sums to zero ($\max|\sum_i K_{ij}| / \max|K_{jj}| < 10^{-10}$): diffusion must not create or destroy mass.
 - **Diagonal Positivity**: $H_{diag} \ge 0$ and $K_{diag} > 0$ to ensure well-posed diffusion.
 - **Sparsity**: $H$ and $K$ sparsity must both be $< 1\%$.
 - **F-Vector Consistency**: The load vector $F$ must be non-zero *only* at the geometrically defined interface nodes.

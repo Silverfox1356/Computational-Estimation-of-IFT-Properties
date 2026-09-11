@@ -82,7 +82,7 @@ class FEMWindow(QWidget):
         self._add_check_widget(sv, "H symmetric", s['H_symmetric'],
                    f"error = {s['H_symmetry_error']:.2e}")
 
-        # --- K near-symmetry (3-tier: ok / warning / fail) ---
+        # --- K symmetry, relative to ‖K‖ (3-tier: ok / warning / fail) ---
         k_status = s.get('K_symmetry_status', 'fail')
         if k_status == 'ok':
             k_color, k_icon = "#4fd07b", "✓"
@@ -90,11 +90,11 @@ class FEMWindow(QWidget):
             k_color, k_icon = "#ffb84d", "⚠"   # amber
         else:
             k_color, k_icon = "#ff6a4d", "✗"
-        lbl_k = QLabel(f"{k_icon}  K near-symmetric")
+        lbl_k = QLabel(f"{k_icon}  K symmetric")
         lbl_k.setStyleSheet(f"color:{k_color}; font-weight:600; "
                             f"font-size:10pt;")
         sv.addWidget(lbl_k)
-        lbl_kd = QLabel(f"    error = {s['K_symmetry_error']:.2e}  "
+        lbl_kd = QLabel(f"    rel. error = {s['K_symmetry_error']:.2e}  "
                         f"[{k_status}]")
         lbl_kd.setStyleSheet("color:#8e95ae; font-size:8.5pt;")
         sv.addWidget(lbl_kd)
@@ -105,6 +105,8 @@ class FEMWindow(QWidget):
              f"min = {s['H_diag_min']:.2e}"),
             ("K diag > 0", s.get('K_diag_positive', False),
              f"min = {s.get('K_diag_min', 0):.2e}"),
+            ("K conserves mass", s.get('K_conservative', False),
+             f"max |column sum| = {s.get('K_colsum_rel', float('nan')):.1e}"),
             ("Sparsity < 1%", s['sparsity_ok'],
              f"H={s['H_sparsity_pct']:.3f}%  K={s['K_sparsity_pct']:.3f}%"),
             ("Boundary terms", s['boundary_terms_ok'],

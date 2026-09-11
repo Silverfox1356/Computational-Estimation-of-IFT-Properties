@@ -68,6 +68,11 @@ N_FIT_STEPS = 200
 D_SEARCH_XATOL = 1e-2
 EDGE_TOL_LOG10 = 2.0 * D_SEARCH_XATOL
 
+# Final 1-D search over log10(kD) around the best grid sample (~1 % in kD).
+# Without it kD is only as fine as the sweep grid — ~3× steps for a
+# 12-point general grid — and the answer is a grid point, not a minimum.
+KD_POLISH_XATOL = 5e-3
+
 
 class EstimationCancelled(Exception):
     """Raised out of the objective to unwind a cancelled fit.
@@ -454,6 +459,25 @@ def estimate_D_k_yang(fem_results, domain_metadata, t_exp, gamma_exp,
                 kD_list.append(float(kD))
                 D_list.append(D_loc)
                 E_list.append(E_loc)
+
+            # Polish.  The grids only SAMPLE kD, so on their own the answer
+            # is rounded to the grid spacing.  E_min(kD) is smooth between
+            # the best sample's neighbours: finish with a bounded search
+            # there.  Only for an interior best sample — an edge sample is
+            # the auto-widen logic's job.
+            ks = np.sort(kD_list)
+            m = int(np.searchsorted(ks, kD_list[int(np.argmin(E_list))]))
+            if 0 < m < len(ks) - 1:
+                def outer(log_kD):
+                    D_loc, E_loc = best_D_for(10.0 ** log_kD, logD_lo, logD_hi)
+                    kD_list.append(10.0 ** log_kD)
+                    D_list.append(D_loc)
+                    E_list.append(E_loc)
+                    return E_loc
+                minimize_scalar(outer, bounds=(np.log10(ks[m - 1]),
+                                               np.log10(ks[m + 1])),
+                                method='bounded',
+                                options={'xatol': KD_POLISH_XATOL})
         order = np.argsort(kD_list)
         return (np.asarray(kD_list)[order], np.asarray(E_list)[order],
                 np.asarray(D_list)[order])
