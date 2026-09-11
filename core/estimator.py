@@ -382,9 +382,13 @@ def estimate_D_k_yang(fem_results, domain_metadata, t_exp, gamma_exp,
         'kD_range','D_bounds' – the final (possibly widened) search box
         'widen_steps'     – how many times a bound was auto-widened
         'gamma_fit'       – γ_sim at the optimum, on t_exp (for plotting)
-        'sweep_kD'        – dict(kD, E[%], D): objective vs kD  (Fig 7b)
-        'sweep_D'         – dict(D, E[%]): objective vs D at kD_best (Fig 7a),
-                            or None when ``scan_D`` is False
+        'sweep_kD'        – dict(kD, E[%], D): objective vs kD, already
+                            minimised over D at each point.  Not a figure in
+                            the paper; it is the kD identifiability view.
+        'sweep_D'         – dict(D, E[%]): objective vs D at kD_best — this
+                            is the paper's Figure 7b (Fig 7a is E vs D at
+                            several kD, for one pressure).  None when
+                            ``scan_D`` is False
 
     Raises
     ------
