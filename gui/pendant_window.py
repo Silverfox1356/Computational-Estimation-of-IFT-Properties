@@ -610,7 +610,7 @@ class PendantWindow(QWidget):
 
         # Calibration curve (concentration → IFT).  Optional: without it
         # the solver uses a crude linear γ(Cs) placeholder.
-        self.box_calib = QGroupBox("Calibration curve (concentration → IFT)")
+        self.box_calib_curve = QGroupBox("Calibration curve (concentration → IFT)")
         l_cal = QVBoxLayout()
 
         cal_head = QHBoxLayout()
@@ -658,8 +658,8 @@ class PendantWindow(QWidget):
         self.lbl_calib_status.setStyleSheet("color:#9aa3b8;")
         l_cal.addWidget(self.lbl_calib_status)
 
-        self.box_calib.setLayout(l_cal)
-        right_panel.addWidget(self.box_calib)
+        self.box_calib_curve.setLayout(l_cal)
+        right_panel.addWidget(self.box_calib_curve)
 
         # Step 7 · Simulation
         self.box_sim = QGroupBox("Step 7 · Simulation")
