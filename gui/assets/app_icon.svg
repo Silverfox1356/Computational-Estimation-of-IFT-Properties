@@ -1,0 +1,14 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 160 160" width="256" height="256">
+  <!-- Placeholder app icon: pendant drop with viridis concentration bands
+       (high gas concentration at the interface, diffusing inward). -->
+  <defs>
+    <path id="drop" d="M74 50 C72 62 40 80 40 105 C40 128 58 140 80 140 C102 140 120 128 120 105 C120 80 88 62 86 50 Z"/>
+  </defs>
+  <rect width="160" height="160" rx="32" fill="#1B1B2F"/>
+  <rect x="73" y="16" width="14" height="36" rx="2" fill="#9AA0B4"/>
+  <use href="#drop" fill="#FDE725"/>
+  <use href="#drop" fill="#5EC962" transform="translate(80 108) scale(0.8) translate(-80 -108)"/>
+  <use href="#drop" fill="#21918C" transform="translate(80 108) scale(0.6) translate(-80 -108)"/>
+  <use href="#drop" fill="#3B528B" transform="translate(80 108) scale(0.4) translate(-80 -108)"/>
+  <use href="#drop" fill="#440154" transform="translate(80 108) scale(0.2) translate(-80 -108)"/>
+</svg>
