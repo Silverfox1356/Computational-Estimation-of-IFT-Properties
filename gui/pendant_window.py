@@ -125,6 +125,44 @@ class AnalysisWorker(QThread):
         self.running = False
 
 
+class StaticAnalysisWorker(QThread):
+    """Runs the single-image drop-shape fit off the UI thread — the YL fit
+    takes seconds on a large image and would otherwise freeze the window."""
+
+    finished_ok = pyqtSignal(dict)       # calculate_physics result dict
+    failed      = pyqtSignal(str)
+
+    def __init__(self, edges_df, baseline_y, pixel_to_m,
+                 density_inner, density_outer,
+                 needle_tol_rel, rho_in_tol_rel, rho_out_tol_rel,
+                 needle_diameter_m):
+        super().__init__()
+        self.edges_df    = edges_df
+        self.baseline_y  = baseline_y
+        self.pixel_to_m  = pixel_to_m
+        self.rho_in      = density_inner
+        self.rho_out     = density_outer
+        self.needle_tol  = needle_tol_rel
+        self.rho_in_tol  = rho_in_tol_rel
+        self.rho_out_tol = rho_out_tol_rel
+        self.d_needle_m  = needle_diameter_m
+
+    def run(self):
+        try:
+            results = calculate_physics(
+                self.edges_df, self.baseline_y, self.pixel_to_m,
+                density_inner=self.rho_in,
+                density_outer=self.rho_out,
+                needle_tol_rel=self.needle_tol,
+                density_inner_tol_rel=self.rho_in_tol,
+                density_outer_tol_rel=self.rho_out_tol)
+            if results.get('fit_success'):
+                results = compute_worthington(results, self.d_needle_m)
+            self.finished_ok.emit(results)
+        except Exception as e:
+            self.failed.emit(str(e))
+
+
 class SimulationCancelled(Exception):
     """Raised inside the progress callback to unwind a cancelled run."""
 
@@ -388,6 +426,7 @@ class PendantWindow(QWidget):
         self._baseline_overlay = None
 
         self.worker = None
+        self.static_worker = None
         self.sim_worker = None
         self.est_worker = None
         # Time grid the last fit ran on (QC-filtered), for the overlay plot.
@@ -1272,27 +1311,60 @@ class PendantWindow(QWidget):
     # Analysis
     # =========================================================================
     def run_static_analysis(self):
+        if self.static_worker is not None and self.static_worker.isRunning():
+            return
         self.lbl_sigma_big.setText("…")
-        self.lbl_sigma_unc.setText("Calculating…")
+        self.lbl_sigma_unc.setText("Calculating… (fitting drop shape)")
+        self.lbl_sigma_unc.setStyleSheet("color:#8ab4ff;")
         self.lbl_qc_badge.setText("")
         self.lbl_meta.setText("")
         self.lbl_dsde.setText("")
         self.lbl_unc_breakdown.setText("")
+
+        # Same inputs the user can change mid-fit are locked until it ends.
+        self.btn_analyze_static.setEnabled(False)
+        self.btn_analyze_static.setText("Calculating…")
+        self.box_calib.setEnabled(False)
+        self.box_base.setEnabled(False)
+
+        self._static_edges = self.edges_df
+        self.static_worker = StaticAnalysisWorker(
+            self.edges_df, self.baseline_y, self.pixel_to_m,
+            self.density_inner, self.density_outer,
+            self.needle_tol_rel, self.rho_in_tol_rel, self.rho_out_tol_rel,
+            self.needle_mm / 1000.0)
+        self.static_worker.finished_ok.connect(self._on_static_done)
+        self.static_worker.failed.connect(self._on_static_failed)
+        self.static_worker.finished.connect(self._on_static_finished)
+        self.static_worker.start()
+
+    def _on_static_finished(self):
+        self.static_worker = None
+        self.btn_analyze_static.setEnabled(True)
+        self.btn_analyze_static.setText("Calculate IFT")
+        self.box_calib.setEnabled(True)
+        self.box_base.setEnabled(True)
+
+    def _on_static_failed(self, msg):
+        self.lbl_sigma_big.setText("—")
+        self.lbl_sigma_unc.setText("")
+        QMessageBox.critical(self, "Error", msg)
+
+    def _on_static_done(self, results):
+        # A new image loaded during the fit makes this result stale.
+        if self.edges_df is not self._static_edges:
+            self.lbl_sigma_big.setText("—")
+            self.lbl_sigma_unc.setText(
+                "Image changed during the fit — click Calculate IFT again.")
+            self.lbl_sigma_unc.setStyleSheet("color:#ff9f5a;")
+            return
         try:
-            results = calculate_physics(
-                self.edges_df, self.baseline_y, self.pixel_to_m,
-                density_inner=self.density_inner,
-                density_outer=self.density_outer,
-                needle_tol_rel=self.needle_tol_rel,
-                density_inner_tol_rel=self.rho_in_tol_rel,
-                density_outer_tol_rel=self.rho_out_tol_rel)
             if not results.get('fit_success'):
                 self.lbl_sigma_big.setText("—")
                 self.lbl_sigma_unc.setText(
                     f"Analysis failed: {results.get('error', 'unknown')}")
                 self.lbl_sigma_unc.setStyleSheet("color:#ff6a4d;")
                 return
-            results = compute_worthington(results, self.needle_mm / 1000.0)
             self.last_results = results
 
             # Clean pixmap, overlays painted as Qt items (cosmetic pens)
@@ -1963,6 +2035,9 @@ class PendantWindow(QWidget):
         if self.worker is not None:
             self.worker.stop()
             self.worker.wait()
+        # A single static fit can't be interrupted; it finishes in seconds.
+        if self.static_worker is not None and self.static_worker.isRunning():
+            self.static_worker.wait()
         # Cancel before waiting: both workers poll a flag between forward
         # simulations, so they unwind in ~one sim.  Waiting without
         # cancelling would block the close for the whole run (minutes).

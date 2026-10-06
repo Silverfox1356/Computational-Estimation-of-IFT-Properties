@@ -107,8 +107,20 @@ def fit_profile_simultaneous(x_exp, y_exp,
                              bounds=None):
     exp_pts = np.column_stack([x_exp, y_exp])
 
+    # The YL integration depends only on beta, but least_squares evaluates
+    # residuals for every finite-difference column — 3 of 4 perturb only
+    # x_axis / y_apex / R0 at the same beta.  Reusing the integrated profile
+    # for a repeated beta gives bit-identical residuals at a fraction of
+    # the cost (the integration is >95 % of the fit's run time).
+    profile_cache = {}
+
     def theoretical(R0_px, beta, x_axis, y_apex):
-        _, xn, zn, _ = yl_profile(beta)
+        key = float(beta)
+        if key not in profile_cache:
+            if len(profile_cache) >= 32:
+                profile_cache.clear()
+            profile_cache[key] = yl_profile(key)
+        _, xn, zn, _ = profile_cache[key]
         xr = x_axis + xn * R0_px
         xl = x_axis - xn * R0_px
         yt = y_apex - zn * R0_px
