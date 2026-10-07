@@ -1,0 +1,11 @@
+{
+  "schema": 1,
+  "kind": "needle",
+  "name": "22G needle (OD 0.7176 mm)",
+  "values": {
+    "od_mm": 0.7176,
+    "id_mm": null,
+    "od_tol_pct": 1.0,
+    "notes": "The app's original default needle."
+  }
+}

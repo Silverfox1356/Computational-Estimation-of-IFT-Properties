@@ -1,0 +1,11 @@
+{
+  "schema": 1,
+  "kind": "needle",
+  "name": "Yang 2006 figure scale (1.31 mm)",
+  "values": {
+    "od_mm": 1.31,
+    "id_mm": 0.4,
+    "od_tol_pct": 1.0,
+    "notes": "NOT a physical needle. Yang's Fig 4a drawing and t = 0 photo draw the needle/neck 1.31 mm wide at the scale that reproduces the caption volume 12.492 mm³. Use when calibrating on those figures; for real photos use the 1.58 mm preset."
+  }
+}

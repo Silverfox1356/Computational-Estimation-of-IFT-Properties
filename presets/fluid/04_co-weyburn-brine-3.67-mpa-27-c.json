@@ -1,0 +1,14 @@
+{
+  "schema": 1,
+  "kind": "fluid",
+  "name": "CO₂ / Weyburn brine, 3.67 MPa, 27 °C",
+  "values": {
+    "rho_in": 1045.0,
+    "rho_out": 81.79,
+    "rho_in_tol_pct": 0.1,
+    "rho_out_tol_pct": 2.0,
+    "T_C": 27.0,
+    "P_MPa": 3.67,
+    "notes": "Yang, Tontiwachwuthikul & Gu, Ind. Eng. Chem. Res. 45 (2006) 4999. Brine: 1.044 g/cm³ at 20 °C (Table 1), corrected to 27 °C and P like pure water (net +0.08 %). CO₂: Span–Wagner EOS via CoolProp. Yang does not state the densities his ADSA used."
+  }
+}

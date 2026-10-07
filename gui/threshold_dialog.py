@@ -10,6 +10,7 @@ import numpy as np
 from PyQt6.QtWidgets import (QDialog, QVBoxLayout, QHBoxLayout, QLabel,
                              QSlider, QPushButton, QFrame)
 from PyQt6.QtCore import Qt
+from gui.window_utils import fit_to_screen, scroll_body
 from PyQt6.QtGui import QImage, QPixmap
 
 
@@ -17,7 +18,7 @@ class ThresholdDialog(QDialog):
     def __init__(self, cv_img, parent=None):
         super().__init__(parent)
         self.setWindowTitle("Tune Image Threshold")
-        self.resize(1040, 580)
+        fit_to_screen(self, 1040, 580, center=False)
 
         self.original_img = cv_img.copy()
         self.current_threshold = 40
@@ -49,7 +50,8 @@ class ThresholdDialog(QDialog):
         self.set_pixmap(self.orig_label, self.original_img)
         images_layout.addWidget(left_frame, 1)
         images_layout.addWidget(right_frame, 1)
-        layout.addLayout(images_layout, 1)
+        body = scroll_body(layout)
+        body.addLayout(images_layout, 1)
 
         slider_row = QHBoxLayout()
         slider_row.addWidget(QLabel("0"))
@@ -63,7 +65,7 @@ class ThresholdDialog(QDialog):
         self.val_label.setMinimumWidth(120)
         self.val_label.setStyleSheet("font-weight: bold; color: #9ec4ff;")
         slider_row.addWidget(self.val_label)
-        layout.addLayout(slider_row)
+        body.addLayout(slider_row)
 
         btn_row = QHBoxLayout()
         self.btn_cancel = QPushButton("Cancel")

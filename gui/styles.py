@@ -138,6 +138,17 @@ QLineEdit:focus { border-color: #5a85e2; }
 
 /* Radios, labels */
 QRadioButton, QCheckBox { background: transparent; }
+/* Explicit radio indicator: the platform one draws nothing when checked
+   on this dark palette. */
+QRadioButton::indicator { width: 12px; height: 12px; border-radius: 8px;
+                          border: 2px solid #7d84a6; background: #1b1d2a; }
+QRadioButton::indicator:hover { border-color: #9ec4ff; }
+QRadioButton::indicator:checked {
+    border: 2px solid #5a85e2;
+    background: qradialgradient(cx:0.5, cy:0.5, radius:0.5, fx:0.5, fy:0.5,
+                                stop:0 #9ec4ff, stop:0.5 #9ec4ff,
+                                stop:0.6 #1b1d2a, stop:1 #1b1d2a); }
+QRadioButton::indicator:disabled { border-color: #3a3f55; }
 QLabel { background: transparent; }
 
 /* Scroll area */

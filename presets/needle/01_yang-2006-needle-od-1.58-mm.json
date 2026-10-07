@@ -1,0 +1,11 @@
+{
+  "schema": 1,
+  "kind": "needle",
+  "name": "Yang 2006 needle (OD 1.58 mm)",
+  "values": {
+    "od_mm": 1.58,
+    "id_mm": 0.4,
+    "od_tol_pct": 1.0,
+    "notes": "Yang 2006 Fig 4a caption: inner radius 0.20 mm, wall 0.59 mm → OD 1.58 mm, ID 0.40 mm. Use for real photos where the physical needle is visible."
+  }
+}

@@ -15,6 +15,7 @@ import pyqtgraph as pg
 from PyQt6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QLabel,
                              QGroupBox, QFrame)
 from PyQt6.QtCore import Qt
+from gui.window_utils import fit_to_screen, scroll_root
 from gui.styles import DARK_STYLESHEET
 
 
@@ -59,13 +60,13 @@ class DomainWindow(QWidget):
     def __init__(self, polygon, metadata, parent=None):
         super().__init__(parent)
         self.setWindowTitle("FEM Domain — Pendant Drop")
-        self.resize(900, 750)
+        fit_to_screen(self, 900, 750)
         self.setStyleSheet(DARK_STYLESHEET)
 
         self.polygon = polygon
         self.metadata = metadata
 
-        root = QVBoxLayout(self)
+        root = scroll_root(self)
         root.setContentsMargins(12, 12, 12, 12)
         root.setSpacing(10)
 

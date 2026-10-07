@@ -15,7 +15,7 @@ Changes in this revision
     · Right panel wrapped in QScrollArea so the full results breakdown
       stays readable even on smaller displays.
     · Compact layout: Calibration and Baseline boxes live side by side.
-    · Settings becomes a small ⚙ icon inline with the mode radios.
+    · Settings is a small button inline with the mode radios.
     · Shared dark theme + pressed-state buttons + visible dropdowns via
       gui.styles.
 """
@@ -37,6 +37,7 @@ from PyQt6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QPushButton,
                              QFormLayout, QLineEdit, QProgressBar,
                              QApplication)
 from PyQt6.QtCore import Qt, QTimer, pyqtSignal, QThread, QRectF, QProcess
+from gui.window_utils import fit_to_screen, scroll_root
 from PyQt6.QtGui import (QImage, QPixmap, QPainter, QWheelEvent, QMouseEvent,
                          QPen, QBrush, QColor, QPainterPath, QDoubleValidator)
 
@@ -53,7 +54,7 @@ from core.calibration import (install_calibration, clear_active_calibration,
                               CalibrationError, ACTIVE_CALIBRATION_PATH)
 from core.ift_data import load_ift_curve, IFTDataError
 from core.camera_handler import CameraHandler
-from gui.settings_dialog import SettingsDialog
+from gui.settings_dialog import SettingsStateMixin
 from gui.threshold_dialog import ThresholdDialog
 from gui.domain_window import DomainWindow
 from gui.mesh_window import MeshWindow
@@ -351,11 +352,11 @@ class ZoomableGraphicsView(QGraphicsView):
 # =============================================================================
 # Pendant window
 # =============================================================================
-class PendantWindow(QWidget):
+class PendantWindow(SettingsStateMixin, QWidget):
     def __init__(self, camera_type="Basler"):
         super().__init__()
         self.setWindowTitle("Pendant Drop Analysis")
-        self.resize(1380, 880)
+        fit_to_screen(self, 1380, 880)
         self.setStyleSheet(DARK_STYLESHEET)
 
         # --- state ----------------------------------------------------
@@ -366,14 +367,9 @@ class PendantWindow(QWidget):
         self.current_raw_image = None
         self.is_video_file = False
 
-        self.needle_mm        = 0.7176
-        self.density_inner    = 998.2
-        self.density_outer    = 1.204
-        self.ts_interval      = 1.0
-        self.needle_id_mm     = None
-        self.needle_tol_rel   = 0.010
-        self.rho_in_tol_rel   = 0.0005
-        self.rho_out_tol_rel  = 0.020
+        # Needle, densities, tolerances, sample interval: restored from the
+        # last session (presets), falling back to water/air + 22G needle.
+        self.init_settings_state()
 
         self.edges_df = None
         self.pixel_to_m = None
@@ -400,7 +396,7 @@ class PendantWindow(QWidget):
         self.ts_start_wall_time = 0
 
         # --- root layout ----------------------------------------------
-        main_layout = QHBoxLayout(self)
+        main_layout = scroll_root(self, QHBoxLayout)
         main_layout.setContentsMargins(10, 10, 10, 10)
         main_layout.setSpacing(10)
 
@@ -408,7 +404,7 @@ class PendantWindow(QWidget):
         self.image_label.setStyleSheet(
             "QGraphicsView{background-color:#0f1018;border:1px solid #343852;"
             "border-radius:6px;}")
-        self.image_label.setMinimumSize(640, 480)
+        self.image_label.setMinimumSize(360, 270)
         self.image_label.image_clicked.connect(self.handle_image_click)
         self.image_label.mouse_moved.connect(self.handle_mouse_move)
         self.image_label.calib_box_ready.connect(self.handle_calib_box)
@@ -435,16 +431,12 @@ class PendantWindow(QWidget):
         mode_row.addWidget(self.radio_static)
         mode_row.addWidget(self.radio_ts)
         mode_row.addStretch(1)
-        self.btn_settings = QPushButton("⚙")
-        self.btn_settings.setFixedWidth(40)
+        self.btn_settings = QPushButton("Settings…")
         self.btn_settings.setToolTip(
             "Physical parameters and measurement tolerances")
-        self.btn_settings.setStyleSheet(BTN_ICON)
         mode_row.addWidget(self.btn_settings)
-        self.btn_restart = QPushButton("⟳")
-        self.btn_restart.setFixedWidth(40)
+        self.btn_restart = QPushButton("Restart")
         self.btn_restart.setToolTip("Restart the application (fresh state)")
-        self.btn_restart.setStyleSheet(BTN_ICON)
         mode_row.addWidget(self.btn_restart)
         mode_box = QGroupBox("Analysis mode")
         mode_box.setLayout(mode_row)
@@ -459,13 +451,13 @@ class PendantWindow(QWidget):
         h_source1.addWidget(self.btn_upload_img)
         h_source1.addWidget(self.btn_upload_vid)
         self.btn_camera  = QPushButton("Start live camera")
-        self.btn_capture = QPushButton("📸  Capture frame")
+        self.btn_capture = QPushButton("Capture frame")
         self.btn_capture.hide()
         h_prep = QHBoxLayout()
-        self.btn_crop       = QPushButton("✂  Crop")
-        self.btn_apply_crop = QPushButton("✓  Apply crop")
+        self.btn_crop       = QPushButton("Crop")
+        self.btn_apply_crop = QPushButton("Apply crop")
         self.btn_apply_crop.setStyleSheet(BTN_SUCCESS)
-        self.btn_thresh     = QPushButton("🎛  Threshold…")
+        self.btn_thresh     = QPushButton("Threshold…")
         self.btn_crop.setEnabled(False)
         self.btn_thresh.setEnabled(False)
         self.btn_apply_crop.hide()
@@ -526,7 +518,7 @@ class PendantWindow(QWidget):
         h_analyze_btns = QHBoxLayout()
         self.btn_analyze_static = QPushButton("Calculate IFT")
         self.btn_analyze_static.setStyleSheet(BTN_PRIMARY)
-        self.btn_analyze_time = QPushButton("▶  Start time series")
+        self.btn_analyze_time = QPushButton("Start time series")
         self.btn_analyze_time.setStyleSheet(BTN_SUCCESS)
         h_analyze_btns.addWidget(self.btn_analyze_static)
         h_analyze_btns.addWidget(self.btn_analyze_time)
@@ -570,7 +562,7 @@ class PendantWindow(QWidget):
         # Step 4 · Domain
         self.box_domain = QGroupBox("Step 4 · Domain")
         l_domain = QVBoxLayout()
-        self.btn_build_domain = QPushButton("🔧  Build Domain")
+        self.btn_build_domain = QPushButton("Build Domain")
         self.btn_build_domain.setStyleSheet(BTN_PRIMARY)
         self.lbl_domain_status = QLabel("Run IFT analysis first.")
         self.lbl_domain_status.setWordWrap(True)
@@ -584,7 +576,7 @@ class PendantWindow(QWidget):
         # Step 5 · Meshing
         self.box_mesh = QGroupBox("Step 5 · Mesh")
         l_mesh = QVBoxLayout()
-        self.btn_generate_mesh = QPushButton("▦  Generate Mesh")
+        self.btn_generate_mesh = QPushButton("Generate Mesh")
         self.btn_generate_mesh.setStyleSheet(BTN_PRIMARY)
         self.lbl_mesh_status = QLabel("Build domain first.")
         self.lbl_mesh_status.setWordWrap(True)
@@ -615,8 +607,8 @@ class PendantWindow(QWidget):
         l_cal = QVBoxLayout()
 
         cal_head = QHBoxLayout()
-        self.btn_calib_download = QPushButton("⬇  Download template")
-        self.btn_calib_upload   = QPushButton("⬆  Upload calibration")
+        self.btn_calib_download = QPushButton("Download template")
+        self.btn_calib_upload   = QPushButton("Upload calibration")
         self.btn_calib_upload.setStyleSheet(BTN_PRIMARY)
         self.btn_calib_clear = QPushButton("Clear")
         self.btn_calib_clear.setToolTip(
@@ -674,7 +666,7 @@ class PendantWindow(QWidget):
         form_sim.addRow("Simulated duration (min):", self.sim_duration_input)
         form_sim.addRow("Time step Δt (s):", self.sim_dtau_input)
         l_sim.addLayout(form_sim)
-        self.btn_run_sim = QPushButton("▶  Run Simulation")
+        self.btn_run_sim = QPushButton("Run Simulation")
         self.btn_run_sim.setStyleSheet(BTN_SUCCESS)
         self.sim_progress = QProgressBar()
         self.sim_progress.setRange(0, 100)
@@ -731,12 +723,12 @@ class PendantWindow(QWidget):
 
         # The fit data can also come from a file — a curve from another
         # tensiometer, or digitised from a paper — instead of Step 3.
-        self.btn_load_ift = QPushButton("📄  Load IFT curve (CSV)…")
+        self.btn_load_ift = QPushButton("Load IFT curve (CSV)…")
         self.btn_load_ift.setToolTip(
             "Two columns: time (s), IFT (mN/m). Optional header row and "
             "'#' comment lines. Replaces the Step-3 time series as the "
             "data the fit uses.")
-        self.btn_estimate = QPushButton("⇆  Fit D, k to measured IFT")
+        self.btn_estimate = QPushButton("Fit D, k to measured IFT")
         self.btn_estimate.setStyleSheet(BTN_PRIMARY)
         self.lbl_est_status = QLabel(
             "Needs FEM (Step 6) + an IFT curve: the Step-3 time series, "
@@ -781,6 +773,7 @@ class PendantWindow(QWidget):
         self.radio_static.toggled.connect(self.switch_mode)
         self.radio_ts.toggled.connect(self.switch_mode)
         self.btn_settings.clicked.connect(self.open_settings)
+        self._update_settings_tooltip()
         self.btn_upload_img.clicked.connect(self.upload_picture)
         self.btn_upload_vid.clicked.connect(self.upload_video)
         self.btn_camera.clicked.connect(self.start_camera)
@@ -923,20 +916,12 @@ class PendantWindow(QWidget):
             self.graph_widget.show()
 
     def open_settings(self):
-        dialog = SettingsDialog(
-            self.needle_mm, self.density_inner, self.density_outer,
-            self.ts_interval,
-            self.needle_tol_rel, self.rho_in_tol_rel, self.rho_out_tol_rel,
-            needle_id_mm=self.needle_id_mm,
-            parent=self)
-        dialog.setStyleSheet(DARK_STYLESHEET)
-        if dialog.exec():
-            (self.needle_mm, self.density_inner, self.density_outer,
-             self.ts_interval, self.needle_tol_rel,
-             self.rho_in_tol_rel, self.rho_out_tol_rel,
-             self.needle_id_mm) = dialog.get_values()
-            if self.width_px is not None:
-                self.pixel_to_m = (self.needle_mm / 1000.0) / self.width_px
+        self.open_settings_dialog(DARK_STYLESHEET)
+
+    def on_settings_applied(self):
+        # A new needle OD changes the scale of an existing needle calibration.
+        if self.width_px is not None:
+            self.pixel_to_m = (self.needle_mm / 1000.0) / self.width_px
 
     def start_crop(self):
         self.image_label.set_mode('crop')
@@ -1199,7 +1184,7 @@ class PendantWindow(QWidget):
             bly = attempt_auto_baseline(self.edges_df, self.width_px)
             if bly:
                 self.baseline_y = bly
-                self._set_base_label(f"Auto ✓   y = {bly}", success=True)
+                self._set_base_label(f"Auto: y = {bly}", success=True)
                 self._paint_baseline(bly)
                 self.box_analyze.setEnabled(True)
             else:
@@ -1264,7 +1249,7 @@ class PendantWindow(QWidget):
             self.image_label.waiting_for_click = False
             self.click_mode = None
             self.baseline_y = y
-            self._set_base_label(f"Manual ✓   y = {y}", success=True)
+            self._set_base_label(f"Manual: y = {y}", success=True)
             self._paint_baseline(y)
             self.box_analyze.setEnabled(True)
 
@@ -1334,7 +1319,7 @@ class PendantWindow(QWidget):
                 self.timer.start(30)
             self.last_grab_time = -999.0
             self.ts_start_wall_time = time.time()
-            self.btn_analyze_time.setText("■  Stop time series")
+            self.btn_analyze_time.setText("Stop time series")
             self.btn_analyze_time.setStyleSheet(BTN_DANGER)
             self.box_calib.setEnabled(False)
             self.box_base.setEnabled(False)
@@ -1344,7 +1329,7 @@ class PendantWindow(QWidget):
             self.worker = None
             if self.is_video_file:
                 self.timer.stop()
-            self.btn_analyze_time.setText("▶  Start time series")
+            self.btn_analyze_time.setText("Start time series")
             self.btn_analyze_time.setStyleSheet(BTN_SUCCESS)
             self.box_calib.setEnabled(True)
             self.box_base.setEnabled(True)
@@ -1384,12 +1369,12 @@ class PendantWindow(QWidget):
 
         qc_pass = r.get('qc_pass', True)
         if qc_pass:
-            self.lbl_qc_badge.setText("✓  QC  PASS")
+            self.lbl_qc_badge.setText("QC: PASS")
             self.lbl_qc_badge.setStyleSheet(
                 "color:#4fd07b; font-weight:700;")
         else:
             fails = [name for name, ok, _ in r.get('qc_checks', []) if not ok]
-            self.lbl_qc_badge.setText("⚠  QC  ISSUES — "
+            self.lbl_qc_badge.setText("QC: ISSUES — "
                                       + ", ".join(fails[:3])
                                       + ("…" if len(fails) > 3 else ""))
             self.lbl_qc_badge.setStyleSheet(
@@ -1402,6 +1387,10 @@ class PendantWindow(QWidget):
                 f"RMSE =  {r.get('rmse_px', 0):.2f} px")
         if Wo is not None:
             meta += f"\nWo   =  {Wo:.3f}"
+        drho = r.get('delta_rho')
+        if drho is not None:
+            meta += (f"\nΔρ   =  {drho:.1f} kg/m³"
+                     f"\n{self.settings_summary()}")
         self.lbl_meta.setText(meta)
 
         sigma_dsde = r.get('ift_dsde_mNm')
@@ -1464,7 +1453,7 @@ class PendantWindow(QWidget):
             n = metadata['n_points']
             h = metadata['drop_height_m'] * 1e3
             self.lbl_domain_status.setText(
-                f"✓ Domain built — {n} points, "
+                f"Domain built — {n} points, "
                 f"drop height {h:.3f} mm")
             self.lbl_domain_status.setStyleSheet(
                 "color:#4fd07b; font-weight:600;")
@@ -1499,7 +1488,7 @@ class PendantWindow(QWidget):
             QMessageBox.warning(self, "No domain",
                                 "Build the domain first (Step 4).")
             return
-        self.lbl_mesh_status.setText("⏳ Generating mesh…")
+        self.lbl_mesh_status.setText("Generating mesh…")
         self.lbl_mesh_status.setStyleSheet("color:#8ab4ff; font-weight:600;")
         self.btn_generate_mesh.setEnabled(False)
         from PyQt6.QtWidgets import QApplication
@@ -1521,7 +1510,7 @@ class PendantWindow(QWidget):
             min_ang = quality['min_angle']
             ar = quality['area_ratio']
             self.lbl_mesh_status.setText(
-                f"✓ {n_nodes:,} nodes, {n_elem:,} elements\n"
+                f"Mesh: {n_nodes:,} nodes, {n_elem:,} elements\n"
                 f"  min∠ {min_ang:.1f}°  area ratio {ar:.0f}×")
             self.lbl_mesh_status.setStyleSheet(
                 "color:#4fd07b; font-weight:600;")
@@ -1556,7 +1545,7 @@ class PendantWindow(QWidget):
             QMessageBox.warning(self, "No mesh",
                                 "Generate the mesh first (Step 5).")
             return
-        self.lbl_fem_status.setText("⏳ Assembling FEM matrices…")
+        self.lbl_fem_status.setText("Assembling FEM matrices…")
         self.lbl_fem_status.setStyleSheet("color:#8ab4ff; font-weight:600;")
         self.btn_run_fem.setEnabled(False)
         from PyQt6.QtWidgets import QApplication
@@ -1572,10 +1561,10 @@ class PendantWindow(QWidget):
 
             self.fem_results = fem
             s = fem['sanity']
-            status = "✓" if s['all_pass'] else "⚠"
+            status = "" if s['all_pass'] else "Warning: "
             n = fem['H'].shape[0]
             self.lbl_fem_status.setText(
-                f"{status} FEM assembled: {n}×{n}\n"
+                f"{status}FEM assembled: {n}×{n}\n"
                 f"  Interface: {s['n_interface_nodes']} nodes\n"
                 f"  Wall: {s['n_wall_nodes']} nodes")
             self.lbl_fem_status.setStyleSheet(
@@ -1651,7 +1640,7 @@ class PendantWindow(QWidget):
         self.calibration = calibration
         n = len(calibration.c_points)
         self.lbl_calib_status.setText(
-            f"✓ Calibration loaded: {n} points, "
+            f"Calibration loaded: {n} points, "
             f"c_sat = {calibration.c_sat:g}, "
             f"γ {calibration.gamma0:g} → {calibration.gamma_inf:g} mN/m. "
             f"Steps 7 & 8 will use it.")
@@ -1706,7 +1695,7 @@ class PendantWindow(QWidget):
         if self.sim_worker is not None and self.sim_worker.isRunning():
             self.sim_worker.cancel()
             self.btn_run_sim.setEnabled(False)
-            self.lbl_sim_status.setText("⏳ Cancelling…")
+            self.lbl_sim_status.setText("Cancelling…")
             self.lbl_sim_status.setStyleSheet("color:#8ab4ff; font-weight:600;")
             return
 
@@ -1727,9 +1716,9 @@ class PendantWindow(QWidget):
 
         self.sim_progress.setValue(0)
         self.sim_progress.setVisible(True)
-        self.lbl_sim_status.setText("⏳ Running simulation…")
+        self.lbl_sim_status.setText("Running simulation…")
         self.lbl_sim_status.setStyleSheet("color:#8ab4ff; font-weight:600;")
-        self.btn_run_sim.setText("■  Cancel")
+        self.btn_run_sim.setText("Cancel")
         self.btn_run_sim.setStyleSheet(BTN_DANGER)
 
         self.sim_worker = SimulationWorker(
@@ -1743,7 +1732,7 @@ class PendantWindow(QWidget):
         self.sim_worker.start()
 
     def _reset_sim_ui(self):
-        self.btn_run_sim.setText("▶  Run Simulation")
+        self.btn_run_sim.setText("Run Simulation")
         self.btn_run_sim.setStyleSheet(BTN_SUCCESS)
         self.btn_run_sim.setEnabled(True)
         self.sim_progress.setVisible(False)
@@ -1757,7 +1746,7 @@ class PendantWindow(QWidget):
         Cs_final = sim['Cs_history'][-1]
         gamma_final = sim['gamma_history'][-1]
         self.lbl_sim_status.setText(
-            f"✓ Simulation complete ({sim['n_steps']} steps, "
+            f"Simulation complete ({sim['n_steps']} steps, "
             f"{sim['actual_time']/60.0:.2f} min simulated)\n"
             f"  Cs = {Cs_final:.4f}  γ = {gamma_final:.1f} mN/m")
         self.lbl_sim_status.setStyleSheet("color:#4fd07b; font-weight:600;")
@@ -1833,7 +1822,7 @@ class PendantWindow(QWidget):
                               top=np.array([]), bottom=np.array([]))
         self.plot_fit_line.setData([], [])          # stale fit, if any
 
-        notes = "".join(f"\n⚠ {w}" for w in data['warnings'])
+        notes = "".join(f"\nWarning: {w}" for w in data['warnings'])
         self.lbl_est_status.setText(
             f"Loaded {len(t)} points from {name} "
             f"(t = {t[0]:g}–{t[-1]:g} s, IFT {g.min():.2f}–{g.max():.2f} "
@@ -1860,7 +1849,7 @@ class PendantWindow(QWidget):
         if self.est_worker is not None and self.est_worker.isRunning():
             self.est_worker.cancel()
             self.btn_estimate.setEnabled(False)
-            self.lbl_est_status.setText("⏳ Cancelling…")
+            self.lbl_est_status.setText("Cancelling…")
             self.lbl_est_status.setStyleSheet("color:#8ab4ff; font-weight:600;")
             return
 
@@ -1905,10 +1894,10 @@ class PendantWindow(QWidget):
 
         dropped = (f", {n_dropped} QC-failed point(s) discarded"
                    if n_dropped else "")
-        self.btn_estimate.setText("■  Cancel")
+        self.btn_estimate.setText("Cancel")
         self.btn_estimate.setStyleSheet(BTN_DANGER)
         self.lbl_est_status.setText(
-            f"⏳ Fitting {len(t_exp)} points{dropped}… "
+            f"Fitting {len(t_exp)} points{dropped}… "
             f"(runs many forward sims)")
         self.lbl_est_status.setStyleSheet("color:#8ab4ff; font-weight:600;")
 
@@ -1922,16 +1911,16 @@ class PendantWindow(QWidget):
         self.est_worker.start()
 
     def _reset_est_ui(self):
-        self.btn_estimate.setText("⇆  Fit D, k to measured IFT")
+        self.btn_estimate.setText("Fit D, k to measured IFT")
         self.btn_estimate.setStyleSheet(BTN_PRIMARY)
         self.btn_estimate.setEnabled(True)
         self.est_worker = None
 
     def _on_est_finished(self, result):
-        status = "✓" if result['success'] else "⚠"
+        status = "" if result['success'] else "Warning (not converged): "
         n_sims = result['n_evaluations'] + result.get('n_scan_evaluations', 0)
         self.lbl_est_status.setText(
-            f"{status} D = {result['D']:.3e} m²/s\n"
+            f"{status}D = {result['D']:.3e} m²/s\n"
             f"   k = {result['k']:.3e} m/s\n"
             f"   kD = {result['kD']:.3f}  (Biot number)\n"
             f"   E = {result['E_percent']:.2f} %  (Yang eq 14 minimum)\n"

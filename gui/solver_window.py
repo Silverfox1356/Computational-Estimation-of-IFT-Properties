@@ -19,6 +19,7 @@ from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg
 from matplotlib.figure import Figure
 
 from gui.styles import DARK_STYLESHEET
+from gui.window_utils import fit_to_screen, scroll_root
 
 
 class _MplCanvas(FigureCanvasQTAgg):
@@ -42,13 +43,13 @@ class SolverWindow(QWidget):
         """
         super().__init__(parent)
         self.setWindowTitle("Diffusion Simulation — Pendant Drop")
-        self.resize(1100, 850)
+        fit_to_screen(self, 1100, 850)
         self.setStyleSheet(DARK_STYLESHEET)
 
         self.sim = sim_results
         self.metadata = metadata
 
-        root = QVBoxLayout(self)
+        root = scroll_root(self)
         root.setContentsMargins(10, 10, 10, 10)
         root.setSpacing(8)
 

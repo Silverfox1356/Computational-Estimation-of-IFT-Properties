@@ -1,6 +1,7 @@
 import sys
 from PyQt6.QtWidgets import QMainWindow, QPushButton, QVBoxLayout, QWidget, QLabel, QComboBox, QGroupBox
 from PyQt6.QtCore import Qt
+from gui.window_utils import fit_to_screen, scroll_root
 from gui.sessile_window import SessileWindow
 from gui.pendant_window import PendantWindow
 
@@ -9,11 +10,11 @@ class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("Drop Analysis Software")
-        self.resize(400, 350)
+        fit_to_screen(self, 400, 350)
 
         central_widget = QWidget()
         self.setCentralWidget(central_widget)
-        layout = QVBoxLayout(central_widget)
+        layout = scroll_root(central_widget)
 
         title_label = QLabel("Select Drop Analysis Type")
         title_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
