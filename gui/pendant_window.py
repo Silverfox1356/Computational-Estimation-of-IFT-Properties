@@ -45,7 +45,7 @@ from PyQt6.QtGui import (QImage, QPixmap, QPainter, QWheelEvent, QMouseEvent,
 from core.image_processing import attempt_auto_baseline
 from core.pendant_calcs import extract_pendant_edges
 from core.physics_calcs import (calculate_physics, compute_worthington,
-                                yl_profile)
+                                fitted_profile_px)
 from core.domain_builder import contour_to_domain
 from core.mesh_generator import generate_mesh
 from core.fem_assembly import assemble_fem_system
@@ -156,6 +156,11 @@ class StaticAnalysisWorker(QThread):
         self.rho_in_tol  = rho_in_tol_rel
         self.rho_out_tol = rho_out_tol_rel
         self.d_needle_m  = needle_diameter_m
+        self._cancel     = False
+
+    def cancel(self):
+        """Checked at every fit evaluation, so the thread stops promptly."""
+        self._cancel = True
 
     def run(self):
         try:
@@ -165,7 +170,8 @@ class StaticAnalysisWorker(QThread):
                 density_outer=self.rho_out,
                 needle_tol_rel=self.needle_tol,
                 density_inner_tol_rel=self.rho_in_tol,
-                density_outer_tol_rel=self.rho_out_tol)
+                density_outer_tol_rel=self.rho_out_tol,
+                should_cancel=lambda: self._cancel)
             if results.get('fit_success'):
                 results = compute_worthington(results, self.d_needle_m)
             self.finished_ok.emit(results)
@@ -1107,20 +1113,21 @@ class PendantWindow(SettingsStateMixin, QWidget):
         self._add_overlay_polyline(lxs, ys, _COL_CONTOUR)
         self._add_overlay_polyline(rxs, ys, _COL_CONTOUR)
 
-        # Fitted YL profile
-        _, xn, zn, _ = yl_profile(results['beta'], n=700)
-        xr = results['x_axis_fit'] + xn * results['R0_px']
-        xl = results['x_axis_fit'] - xn * results['R0_px']
-        yt = results['y_apex_fit'] - zn * results['R0_px']
-        mask = (yt >= self.baseline_y - 2) & (yt <= results['y_apex_fit'] + 2)
-        if mask.sum() > 2:
-            self._add_overlay_polyline(xr[mask], yt[mask], _COL_FITCURVE)
-            self._add_overlay_polyline(xl[mask], yt[mask], _COL_FITCURVE)
+        # Fitted YL profile — the same neck-cut, tilted curve the fit used
+        for xs, yt in fitted_profile_px(results):
+            mask = yt >= self.baseline_y - 2
+            if mask.sum() > 2:
+                self._add_overlay_polyline(xs[mask], yt[mask], _COL_FITCURVE)
 
-        # Apex osculating (R₀) circle — centered R₀ above the fitted apex
+        # Unit vector up the (tilted) symmetry axis, in image coordinates
+        th = results.get('tilt_rad', 0.0)
+        up_x, up_y = np.sin(th), -np.cos(th)
+        ax, ay = results['x_axis_fit'], results['y_apex_fit']
+
+        # Apex osculating (R₀) circle — centered R₀ up the axis from the apex
         R = results['R0_px']
-        cx_circle = results['x_axis_fit']
-        cy_circle = results['y_apex_fit'] - R
+        cx_circle = ax + R * up_x
+        cy_circle = ay + R * up_y
         ellipse = QGraphicsEllipseItem(cx_circle - R + 0.5,
                                        cy_circle - R + 0.5,
                                        2 * R, 2 * R)
@@ -1129,16 +1136,15 @@ class PendantWindow(SettingsStateMixin, QWidget):
         scene.addItem(ellipse)
         self._result_overlays.append(ellipse)
 
-        # Axis of symmetry (dashed, from baseline to just below apex)
-        ax = results['x_axis_fit']
-        axis = QGraphicsLineItem(ax + 0.5, float(self.baseline_y),
-                                 ax + 0.5, results['y_apex_fit'] + 10)
+        # Axis of symmetry (dashed, from the baseline height to just below apex)
+        L_up = (ay - float(self.baseline_y)) / max(np.cos(th), 1e-6)
+        axis = QGraphicsLineItem(ax - 10 * up_x + 0.5, ay - 10 * up_y + 0.5,
+                                 ax + L_up * up_x + 0.5, ay + L_up * up_y + 0.5)
         axis.setPen(make_cosmetic_pen(_COL_AXIS, dashed=True))
         scene.addItem(axis)
         self._result_overlays.append(axis)
 
         # Apex crosshair
-        ay = results['y_apex_fit']
         ch_len = 7
         h = QGraphicsLineItem(ax - ch_len + 0.5, ay + 0.5,
                               ax + ch_len + 0.5, ay + 0.5)
@@ -1541,7 +1547,11 @@ class PendantWindow(SettingsStateMixin, QWidget):
     # Analysis
     # =========================================================================
     def run_static_analysis(self):
+        # A second click while running acts as Cancel.
         if self.static_worker is not None and self.static_worker.isRunning():
+            self.static_worker.cancel()
+            self.btn_analyze_static.setEnabled(False)
+            self.btn_analyze_static.setText("Cancelling…")
             return
         self.lbl_sigma_big.setText("…")
         self.lbl_sigma_unc.setText("Calculating… (fitting drop shape)")
@@ -1551,9 +1561,9 @@ class PendantWindow(SettingsStateMixin, QWidget):
         self.lbl_dsde.setText("")
         self.lbl_unc_breakdown.setText("")
 
-        # Same inputs the user can change mid-fit are locked until it ends.
-        self.btn_analyze_static.setEnabled(False)
-        self.btn_analyze_static.setText("Calculating…")
+        # Same inputs the user can change mid-fit are locked until it ends;
+        # the button itself stays live as Cancel.
+        self.btn_analyze_static.setText("■  Cancel")
         self.box_calib.setEnabled(False)
         self.box_base.setEnabled(False)
 
@@ -1591,9 +1601,13 @@ class PendantWindow(SettingsStateMixin, QWidget):
         try:
             if not results.get('fit_success'):
                 self.lbl_sigma_big.setText("—")
-                self.lbl_sigma_unc.setText(
-                    f"Analysis failed: {results.get('error', 'unknown')}")
-                self.lbl_sigma_unc.setStyleSheet("color:#ff6a4d;")
+                err = results.get('error', 'unknown')
+                if err == "Fit stopped: cancelled":
+                    self.lbl_sigma_unc.setText("Cancelled.")
+                    self.lbl_sigma_unc.setStyleSheet("color:#aab4d0;")
+                else:
+                    self.lbl_sigma_unc.setText(f"Analysis failed: {err}")
+                    self.lbl_sigma_unc.setStyleSheet("color:#ff6a4d;")
                 return
             self.last_results = results
 
@@ -2045,7 +2059,8 @@ class PendantWindow(SettingsStateMixin, QWidget):
         meta = (f"β   =  {r['beta']:.4f}\n"
                 f"R₀  =  {r['R0_mm']:.4f} mm\n"
                 f"V    =  {r['volume_ul']:.2f} µL\n"
-                f"RMSE =  {r.get('rmse_px', 0):.2f} px")
+                f"RMSE =  {r.get('rmse_px', 0):.2f} px\n"
+                f"Tilt =  {r.get('tilt_deg', 0):+.2f}°")
         if Wo is not None:
             meta += f"\nWo   =  {Wo:.3f}"
         drho = r.get('delta_rho')
@@ -2686,8 +2701,8 @@ class PendantWindow(SettingsStateMixin, QWidget):
         if self.worker is not None:
             self.worker.stop()
             self.worker.wait()
-        # A single static fit can't be interrupted; it finishes in seconds.
         if self.static_worker is not None and self.static_worker.isRunning():
+            self.static_worker.cancel()
             self.static_worker.wait()
         # Cancel before waiting: both workers poll a flag between forward
         # simulations, so they unwind in ~one sim.  Waiting without
