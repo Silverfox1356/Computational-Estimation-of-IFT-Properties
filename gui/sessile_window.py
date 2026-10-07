@@ -33,13 +33,14 @@ from PyQt6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QPushButton,
                              QComboBox, QInputDialog, QFrame, QScrollArea,
                              QRadioButton, QButtonGroup)
 from PyQt6.QtCore import Qt, QTimer, pyqtSignal, QRectF
+from gui.window_utils import fit_to_screen, scroll_root
 from PyQt6.QtGui import (QImage, QPixmap, QPainter, QWheelEvent, QMouseEvent,
                          QPen, QBrush, QColor, QPainterPath)
 
 from core.sessile_calcs import analyze_sessile_drop
 from core.camera_handler import CameraHandler
 from gui.threshold_dialog import ThresholdDialog
-from gui.settings_dialog import SettingsDialog
+from gui.settings_dialog import SettingsStateMixin
 from gui.styles import (DARK_STYLESHEET, BTN_PRIMARY, BTN_SUCCESS, BTN_ICON,
                         make_cosmetic_pen, make_pixel_pen)
 
@@ -321,11 +322,11 @@ class ZoomableGraphicsView(QGraphicsView):
 # =============================================================================
 # Sessile window
 # =============================================================================
-class SessileWindow(QWidget):
+class SessileWindow(SettingsStateMixin, QWidget):
     def __init__(self, camera_type="Basler"):
         super().__init__()
         self.setWindowTitle("Sessile Drop Analysis")
-        self.resize(1300, 880)
+        fit_to_screen(self, 1300, 880)
         self.setStyleSheet(DARK_STYLESHEET)
 
         # state
@@ -333,13 +334,9 @@ class SessileWindow(QWidget):
         self.timer = QTimer(); self.timer.timeout.connect(self.update_frame)
         self.current_raw_image = None
         self.pixel_to_m = None
-        self.needle_mm = 0.7176
-        self.density_inner = 1000.0
-        self.density_outer = 1.204
-        self.ts_interval = 1.0
-        self.needle_tol_rel = 0.010
-        self.rho_in_tol_rel = 0.0005
-        self.rho_out_tol_rel = 0.020
+        # Needle, densities, tolerances, sample interval: restored from the
+        # last session (presets, shared with the pendant window).
+        self.init_settings_state()
 
         self.baseline_data = None
         self.roi_points = None
@@ -353,7 +350,7 @@ class SessileWindow(QWidget):
         self._roi_overlay_items = []
 
         # --- root layout ----------------------------------------------
-        main_layout = QHBoxLayout(self)
+        main_layout = scroll_root(self, QHBoxLayout)
         main_layout.setContentsMargins(10, 10, 10, 10)
         main_layout.setSpacing(10)
 
@@ -361,7 +358,7 @@ class SessileWindow(QWidget):
         self.image_label.setStyleSheet(
             "QGraphicsView{background-color:#0f1018;border:1px solid #343852;"
             "border-radius:6px;}")
-        self.image_label.setMinimumSize(640, 480)
+        self.image_label.setMinimumSize(360, 270)
         main_layout.addWidget(self.image_label, stretch=3)
 
         self.image_label.calib_ready.connect(self.handle_calib_pts)
@@ -383,16 +380,14 @@ class SessileWindow(QWidget):
         right_panel.setContentsMargins(4, 4, 8, 4)
         right_panel.setSpacing(8)
 
-        # Header + ⚙
+        # Header + Settings button
         hdr_row = QHBoxLayout()
         title = QLabel("Contact Angle Analysis")
         title.setStyleSheet("font-size:11pt; font-weight:600; color:#9ec4ff;")
         hdr_row.addWidget(title)
         hdr_row.addStretch(1)
-        self.btn_settings = QPushButton("⚙")
-        self.btn_settings.setFixedWidth(40)
+        self.btn_settings = QPushButton("Settings…")
         self.btn_settings.setToolTip("Physical parameters and tolerances")
-        self.btn_settings.setStyleSheet(BTN_ICON)
         hdr_row.addWidget(self.btn_settings)
         hdr_box = QGroupBox()
         hdr_box.setLayout(hdr_row)
@@ -406,13 +401,13 @@ class SessileWindow(QWidget):
         self.btn_live   = QPushButton("Start live camera")
         h_source.addWidget(self.btn_upload)
         h_source.addWidget(self.btn_live)
-        self.btn_capture = QPushButton("📸  Capture frame")
+        self.btn_capture = QPushButton("Capture frame")
         self.btn_capture.hide()
         h_prep = QHBoxLayout()
-        self.btn_crop       = QPushButton("✂  Crop")
-        self.btn_apply_crop = QPushButton("✓  Apply")
+        self.btn_crop       = QPushButton("Crop")
+        self.btn_apply_crop = QPushButton("Apply crop")
         self.btn_apply_crop.setStyleSheet(BTN_SUCCESS)
-        self.btn_thresh     = QPushButton("🎛  Threshold…")
+        self.btn_thresh     = QPushButton("Threshold…")
         self.btn_crop.setEnabled(False)
         self.btn_thresh.setEnabled(False)
         self.btn_apply_crop.hide()
@@ -549,6 +544,7 @@ class SessileWindow(QWidget):
 
         # wiring
         self.btn_settings.clicked.connect(self.open_settings)
+        self._update_settings_tooltip()
         self.btn_upload.clicked.connect(self.upload_picture)
         self.btn_live.clicked.connect(self.start_camera)
         self.btn_capture.clicked.connect(self.capture_frame)
@@ -741,16 +737,7 @@ class SessileWindow(QWidget):
     # Settings / misc
     # =========================================================================
     def open_settings(self):
-        dialog = SettingsDialog(
-            self.needle_mm, self.density_inner, self.density_outer,
-            self.ts_interval,
-            self.needle_tol_rel, self.rho_in_tol_rel, self.rho_out_tol_rel,
-            self)
-        dialog.setStyleSheet(DARK_STYLESHEET)
-        if dialog.exec():
-            (self.needle_mm, self.density_inner, self.density_outer,
-             self.ts_interval, self.needle_tol_rel,
-             self.rho_in_tol_rel, self.rho_out_tol_rel) = dialog.get_values()
+        self.open_settings_dialog(DARK_STYLESHEET)
 
     def start_crop(self):
         self.image_label.set_mode('crop')
@@ -1119,7 +1106,7 @@ class SessileWindow(QWidget):
         asym_ok = active_asym <= 3.0
         rms_ok  = rms <= 2.0
         if asym_ok and rms_ok:
-            self.lbl_qc_badge.setText("✓  QC  PASS")
+            self.lbl_qc_badge.setText("QC: PASS")
             self.lbl_qc_badge.setStyleSheet(
                 "color:#4fd07b; font-weight:700;")
         else:
@@ -1130,7 +1117,7 @@ class SessileWindow(QWidget):
                 flags.append(f"RMS={rms:.2f} px > 2")
             if not flags:
                 flags.append("contour fit uncertain")
-            self.lbl_qc_badge.setText("⚠  QC  ISSUES — " + ", ".join(flags))
+            self.lbl_qc_badge.setText("QC: ISSUES — " + ", ".join(flags))
             self.lbl_qc_badge.setStyleSheet(
                 "color:#ff9f5a; font-weight:700;")
 

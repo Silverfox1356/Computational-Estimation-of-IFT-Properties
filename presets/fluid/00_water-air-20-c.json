@@ -1,0 +1,14 @@
+{
+  "schema": 1,
+  "kind": "fluid",
+  "name": "Water / air, 20 °C",
+  "values": {
+    "rho_in": 998.2,
+    "rho_out": 1.204,
+    "rho_in_tol_pct": 0.05,
+    "rho_out_tol_pct": 2.0,
+    "T_C": 20.0,
+    "P_MPa": 0.101325,
+    "notes": "Pure water and dry air at 20 °C, 1 atm. The app's original defaults."
+  }
+}

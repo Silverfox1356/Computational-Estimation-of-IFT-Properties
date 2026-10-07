@@ -14,6 +14,7 @@ import pyqtgraph as pg
 from PyQt6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QLabel,
                              QGroupBox, QFrame)
 from PyQt6.QtCore import Qt
+from gui.window_utils import fit_to_screen, scroll_root
 from gui.styles import DARK_STYLESHEET
 from gui.domain_window import _hatch_rect
 
@@ -24,7 +25,7 @@ class FEMWindow(QWidget):
     @staticmethod
     def _add_check_widget(layout, name, ok, detail):
         """Add a single check row (icon + name + detail) to *layout*."""
-        icon = "✓" if ok else "✗"
+        icon = "PASS" if ok else "FAIL"
         color = "#4fd07b" if ok else "#ff6a4d"
         lbl = QLabel(f"{icon}  {name}")
         lbl.setStyleSheet(f"color:{color}; font-weight:600; "
@@ -45,14 +46,14 @@ class FEMWindow(QWidget):
         """
         super().__init__(parent)
         self.setWindowTitle("FEM Assembly — Pendant Drop")
-        self.resize(1000, 820)
+        fit_to_screen(self, 1000, 820)
         self.setStyleSheet(DARK_STYLESHEET)
 
         self.fem = fem_results
         self.polygon = polygon
         self.metadata = metadata
 
-        root = QVBoxLayout(self)
+        root = scroll_root(self)
         root.setContentsMargins(12, 12, 12, 12)
         root.setSpacing(10)
 
@@ -85,11 +86,11 @@ class FEMWindow(QWidget):
         # --- K symmetry, relative to ‖K‖ (3-tier: ok / warning / fail) ---
         k_status = s.get('K_symmetry_status', 'fail')
         if k_status == 'ok':
-            k_color, k_icon = "#4fd07b", "✓"
+            k_color, k_icon = "#4fd07b", "PASS"
         elif k_status == 'warning':
-            k_color, k_icon = "#ffb84d", "⚠"   # amber
+            k_color, k_icon = "#ffb84d", "WARN"   # amber
         else:
-            k_color, k_icon = "#ff6a4d", "✗"
+            k_color, k_icon = "#ff6a4d", "FAIL"
         lbl_k = QLabel(f"{k_icon}  K symmetric")
         lbl_k.setStyleSheet(f"color:{k_color}; font-weight:600; "
                             f"font-size:10pt;")
@@ -121,7 +122,7 @@ class FEMWindow(QWidget):
 
         overall_pass = s['all_pass']
         lbl_all = QLabel("ALL CHECKS PASS" if overall_pass
-                         else "⚠ SOME CHECKS FAILED")
+                         else "SOME CHECKS FAILED")
         lbl_all.setStyleSheet(
             f"color:{'#4fd07b' if overall_pass else '#ff6a4d'}; "
             f"font-weight:700; font-size:11pt; margin-top:6px;")

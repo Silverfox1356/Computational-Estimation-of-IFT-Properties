@@ -15,6 +15,7 @@ import pyqtgraph as pg
 from PyQt6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QLabel,
                              QGroupBox, QFrame)
 from PyQt6.QtCore import Qt
+from gui.window_utils import fit_to_screen, scroll_root
 from gui.styles import DARK_STYLESHEET
 from gui.domain_window import _hatch_rect
 
@@ -26,7 +27,7 @@ class MeshWindow(QWidget):
                  polygon, metadata, parent=None):
         super().__init__(parent)
         self.setWindowTitle("FEM Mesh — Pendant Drop")
-        self.resize(950, 800)
+        fit_to_screen(self, 950, 800)
         self.setStyleSheet(DARK_STYLESHEET)
 
         self.points = points
@@ -35,7 +36,7 @@ class MeshWindow(QWidget):
         self.polygon = polygon
         self.metadata = metadata
 
-        root = QVBoxLayout(self)
+        root = scroll_root(self)
         root.setContentsMargins(12, 12, 12, 12)
         root.setSpacing(10)
 
