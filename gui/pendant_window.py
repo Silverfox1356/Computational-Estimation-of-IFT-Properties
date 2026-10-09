@@ -224,8 +224,9 @@ class EstimationWorker(QThread):
 
     def __init__(self, fem_results, domain_metadata, t_exp, gamma_exp,
                  calibration=None, kD_range=None, D_bounds=None,
-                 auto_widen=True):
+                 auto_widen=True, t_offset=0.0):
         super().__init__()
+        self.t_offset        = t_offset
         self.fem_results     = fem_results
         self.domain_metadata = domain_metadata
         self.t_exp           = t_exp
@@ -250,6 +251,7 @@ class EstimationWorker(QThread):
                 calibration=self.calibration,
                 kD_range=self.kD_range, D_bounds=self.D_bounds,
                 auto_widen=self.auto_widen,
+                t_offset=self.t_offset,
                 should_cancel=lambda: self._cancel)
             self.finished_ok.emit(result)
         except EstimationCancelled:
@@ -760,6 +762,20 @@ class PendantWindow(SettingsStateMixin, QWidget):
         self.manual_range_box.setVisible(False)
         l_est.addWidget(self.manual_range_box)
 
+        # Time between drop formation and the measured clock's zero.  The
+        # model starts with no gas in the drop at t = 0, so a late clock
+        # biases D and k (Yang's own code adds 2 s).
+        offset_form = QFormLayout()
+        offset_form.setContentsMargins(0, 0, 0, 0)
+        self.in_t_offset = QLineEdit("0")
+        self.in_t_offset.setValidator(QDoubleValidator(-1e6, 1e6, 6))
+        self.in_t_offset.setToolTip(
+            "Seconds between drop formation and time zero of the measured "
+            "curve; added to every measured time. Use it when the first "
+            "image was taken after the drop formed (Yang et al. used 2 s).")
+        offset_form.addRow("Time offset (s):", self.in_t_offset)
+        l_est.addLayout(offset_form)
+
         # The fit data can also come from a file — a curve from another
         # tensiometer, or digitised from a paper — instead of Step 3.
         self.btn_load_ift = QPushButton("Load IFT curve (CSV)…")
@@ -777,6 +793,25 @@ class PendantWindow(SettingsStateMixin, QWidget):
         l_est.addWidget(self.btn_load_ift)
         l_est.addWidget(self.btn_estimate)
         l_est.addWidget(self.lbl_est_status)
+
+        # How well the curve pins D and k: every (kD, best D) the search
+        # tried, with the fits that are as good as the best one highlighted
+        # (Yang 2006 Fig 7, plus the valley it hides).
+        self.est_plots = QWidget()
+        ep = QVBoxLayout(self.est_plots)
+        ep.setContentsMargins(0, 4, 0, 0)
+        self.plot_E_kD = pg.PlotWidget(title="Fit error vs kD")
+        self.plot_D_kD = pg.PlotWidget(title="Best D at each kD")
+        for pw, ylab in ((self.plot_E_kD, 'E (%)'), (self.plot_D_kD, 'D (m²/s)')):
+            pw.setLabel('bottom', 'kD')
+            pw.setLabel('left', ylab)
+            pw.showGrid(x=True, y=True, alpha=0.25)
+            pw.setMinimumHeight(170)
+            ep.addWidget(pw)
+        self.plot_E_kD.setLogMode(x=True, y=False)
+        self.plot_D_kD.setLogMode(x=True, y=True)
+        self.est_plots.setVisible(False)
+        l_est.addWidget(self.est_plots)
         self.box_est.setLayout(l_est)
         self.box_est.setEnabled(False)
         right_panel.addWidget(self.box_est)
@@ -1961,6 +1996,19 @@ class PendantWindow(SettingsStateMixin, QWidget):
         else:
             kD_range, D_bounds, auto_widen = None, None, True
 
+        try:
+            t_offset = float(self.in_t_offset.text().replace(',', '.') or 0.0)
+        except ValueError:
+            QMessageBox.warning(self, "Invalid time offset",
+                                "Enter the time offset in seconds (e.g. 0 or 2).")
+            return
+        if np.any(np.asarray(t_exp) + t_offset < 0):
+            QMessageBox.warning(
+                self, "Invalid time offset",
+                f"A time offset of {t_offset:g} s puts some measurements "
+                f"before the drop formed (t < 0). Use a larger offset.")
+            return
+
         # γ_fit comes back on this grid, so keep it for the overlay plot.
         self._est_t_exp = t_exp
 
@@ -1976,7 +2024,8 @@ class PendantWindow(SettingsStateMixin, QWidget):
         self.est_worker = EstimationWorker(
             self.fem_results, self.domain_metadata, t_exp, gamma_exp,
             calibration=self.calibration,
-            kD_range=kD_range, D_bounds=D_bounds, auto_widen=auto_widen)
+            kD_range=kD_range, D_bounds=D_bounds, auto_widen=auto_widen,
+            t_offset=t_offset)
         self.est_worker.finished_ok.connect(self._on_est_finished)
         self.est_worker.failed.connect(self._on_est_failed)
         self.est_worker.cancelled.connect(self._on_est_cancelled)
@@ -1991,6 +2040,16 @@ class PendantWindow(SettingsStateMixin, QWidget):
     def _on_est_finished(self, result):
         status = "" if result['success'] else "Warning (not converged): "
         n_sims = result['n_evaluations'] + result.get('n_scan_evaluations', 0)
+        D_lo, D_hi = result['D_near']
+        kD_lo, kD_hi = result['kD_near']
+        tol = 100 * result['near_tol']
+        more = " or beyond (edge of the search range)" if result['near_open'] else ""
+        if result['D_well_determined']:
+            verdict = "D is well determined by this curve."
+        else:
+            verdict = ("Warning: D is NOT well determined. Fits this good span "
+                       f"a {D_hi / D_lo:.0f}x range of D; this curve alone "
+                       "cannot tell them apart.")
         self.lbl_est_status.setText(
             f"{status}D = {result['D']:.3e} m²/s\n"
             f"   k = {result['k']:.3e} m/s\n"
@@ -1998,15 +2057,42 @@ class PendantWindow(SettingsStateMixin, QWidget):
             f"   E = {result['E_percent']:.2f} %  (Yang eq 14 minimum)\n"
             f"   RMS misfit {result['residual_rms']:.3f} mN/m "
             f"({n_sims} simulations)\n"
+            f"   Equally good fits (E within {tol:.0f} % of the best):\n"
+            f"      D {D_lo:.2e} to {D_hi:.2e} m²/s{more}\n"
+            f"      kD {kD_lo:.3g} to {kD_hi:.3g}\n"
+            f"   Time offset {result['t_offset']:g} s\n"
+            f"   {verdict}\n"
             f"   {result['message']}")
+        good = result['success'] and result['D_well_determined']
         self.lbl_est_status.setStyleSheet(
-            f"color:{'#4fd07b' if result['success'] else '#ff9f5a'};"
+            f"color:{'#4fd07b' if good else '#ff9f5a'};"
             f" font-weight:600;")
+        self._plot_est_sweep(result)
         # Overlay the fitted curve on the measured IFT plot.  Plot against
         # the grid the fit actually used, not the full measured series —
         # QC-failed points were dropped, so the lengths differ.
         self.plot_fit_line.setData(self._est_t_exp, result['gamma_fit'])
         self._reset_est_ui()
+
+    def _plot_est_sweep(self, result):
+        """E and best D against kD for every kD the search tried; the fits
+        within the near-tolerance of the best are highlighted."""
+        sw = result['sweep_kD']
+        kD, E, D = (np.asarray(sw['kD']), np.asarray(sw['E']),
+                    np.asarray(sw['D']))
+        near = E <= result['E_percent'] * (1.0 + result['near_tol'])
+        for pw, y in ((self.plot_E_kD, E), (self.plot_D_kD, D)):
+            pw.clear()
+            pw.plot(kD, y, pen=pg.mkPen('#5a6488', width=1),
+                    symbol='o', symbolSize=5, symbolBrush='#5a6488',
+                    symbolPen=None)
+            pw.plot(kD[near], y[near], pen=None, symbol='o', symbolSize=8,
+                    symbolBrush='#ffd166', symbolPen=None)
+            pw.plot([result['kD']], [result['E_percent'] if pw is self.plot_E_kD
+                                     else result['D']],
+                    pen=None, symbol='star', symbolSize=14,
+                    symbolBrush='#4fd07b', symbolPen=None)
+        self.est_plots.setVisible(True)
 
     def _on_est_failed(self, message):
         self.lbl_est_status.setText(f"Estimation failed: {message}")

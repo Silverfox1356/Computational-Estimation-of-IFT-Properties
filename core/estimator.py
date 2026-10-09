@@ -34,7 +34,7 @@ parameter space.  Conversion back to physical units happens inside
 import numpy as np
 from scipy.optimize import least_squares, minimize_scalar
 
-from core.time_solver import solve_diffusion
+from core.time_solver import compute_gamma, solve_diffusion
 
 # Yang et al. (2006) search ranges for the reservoir brine–CO2 system
 # (Section 2.3): D ∈ 0.01–10 ×10⁻⁹ m²/s, Biot number kD ∈ 0.1–15.
@@ -53,11 +53,23 @@ GENERAL_D_BOUNDS = (1e-11, 1e-8)
 DEFAULT_BOUNDS = ((1e-11, 1e-8),   # D  (m²/s)
                   (1e-7, 1e-3))    # k  (m/s)
 
-# Forward runs inside the fit use a coarse time grid: the θ-scheme is
-# unconditionally stable, so ~N_FIT_STEPS steps over the experiment
-# duration trade resolution for speed (one optimiser run = dozens to
-# hundreds of forward simulations).
-N_FIT_STEPS = 200
+# Forward runs inside the fit use the graded schedule of
+# ``core.time_solver.graded_schedule`` (fine steps at the start, where the
+# interface concentration — and hence kD — is decided; θ from 2/3 to 1),
+# unless a caller passes an explicit uniform step ``dtau``.  The old default,
+# N_FIT_STEPS uniform steps at θ = 0.7, was ~100× coarser at early times
+# than D. Yang's own code.
+N_FIT_STEPS = 200          # only for callers that still want uniform steps
+
+# "Equally good" fits: every (D, kD) the search evaluated whose E is within
+# this fraction of E_min.  For a noise-dominated fit, +10 % in E is about
+# +21 % in the sum of squares — a clearly detectable difference for the
+# 15–40 points of a typical curve, so the range is a conservative
+# "cannot tell apart" set, not a formal confidence interval.
+NEAR_FIT_TOL = 0.10
+# D is reported as poorly determined when the equally-good fits span more
+# than this factor.
+D_WELL_DETERMINED_RATIO = 3.0
 
 # Convergence tolerance of the inner 1-D search over log10(D) (scipy's
 # bounded Brent).  Brent keeps its iterate strictly INSIDE the bracket, so
@@ -126,7 +138,7 @@ def _rescale_fem_system(fem_results, D, k):
 
 
 def simulate_ift(fem_results, domain_metadata, D, k, t_eval,
-                 dtau, total_time=None, calibration=None):
+                 dtau=None, total_time=None, calibration=None):
     """
     Forward model as a clean callable.
 
@@ -140,7 +152,9 @@ def simulate_ift(fem_results, domain_metadata, D, k, t_eval,
     D : float                  – diffusion coefficient (m²/s)
     k : float                  – mass-transfer coefficient (m/s)
     t_eval : array-like        – times (s) to evaluate γ_sim at
-    dtau : float               – forward-run time step (s)
+    dtau : float or None       – None (default): graded time steps; a
+                                 number: uniform steps of that size (s),
+                                 θ = 0.7
     total_time : float or None – simulated duration; default t_eval[-1]
     calibration : object or None
         Concentration→IFT calibration passed through to
@@ -158,13 +172,21 @@ def simulate_ift(fem_results, domain_metadata, D, k, t_eval,
     sim = solve_diffusion(
         fem_scaled, domain_metadata,
         D=D, k=k,
-        dtau=dtau, total_time=total_time,
+        stepping='graded' if dtau is None else 'uniform',
+        dtau=dtau if dtau is not None else 0.01,
+        total_time=total_time,
         snapshot_steps=[],          # no snapshots inside the fit loop
         progress_cb=None,
         calibration=calibration,
         verbose=False,
     )
-    return np.interp(t_eval, sim['time_history'], sim['gamma_history'])
+    # Include the known start (t = 0, C = 0 → clean-interface γ): the solver's
+    # history begins after the first step, and without this point any
+    # measurement inside the first step would get the first step's value.
+    gamma0 = (calibration.gamma(np.array([0.0])) if calibration is not None
+              else compute_gamma([0.0]))[0]
+    return np.interp(t_eval, np.r_[0.0, sim['time_history']],
+                     np.r_[gamma0, sim['gamma_history']])
 
 
 def ift_residuals(params, fem_results, domain_metadata, t_exp, gamma_exp,
@@ -200,12 +222,28 @@ def ift_residuals(params, fem_results, domain_metadata, t_exp, gamma_exp,
     return resid
 
 
+def _model_times(t_exp, t_offset):
+    """Measured times shifted onto the model clock (t = 0 at drop formation).
+
+    ``t_offset`` (s) is the time between drop formation and the measured
+    clock's zero — D. Yang's code adds 2 s (``T_0``).  The model starts with
+    C = 0 at its t = 0, so a shifted time must not be negative.
+    """
+    t_model = np.asarray(t_exp, dtype=float) + float(t_offset)
+    if np.any(t_model < 0.0):
+        raise ValueError(
+            f"time offset {t_offset:g} s puts {int(np.sum(t_model < 0))} "
+            f"measurement(s) before drop formation (t < 0)")
+    return t_model
+
+
 def estimate_D_k(fem_results, domain_metadata, t_exp, gamma_exp,
                  initial_guess=(1e-9, 1e-5),
                  bounds=DEFAULT_BOUNDS,
                  dtau=None, total_time=None,
                  calibration=None,
                  objective='relative',
+                 t_offset=0.0,
                  verbose=False):
     """
     Least-squares fit for (D, k) against a measured γ_exp(t).
@@ -219,16 +257,19 @@ def estimate_D_k(fem_results, domain_metadata, t_exp, gamma_exp,
     bounds : ((D_lo, D_hi), (k_lo, k_hi))
         Physical-unit search box.
     dtau : float or None
-        Forward-run step for fit iterations.  Default: total_time /
-        N_FIT_STEPS — coarse on purpose, see module docstring.
+        None (default): graded time steps (see module docstring); a
+        number: uniform forward-run step (s).
     total_time : float or None
-        Default: t_exp[-1].
+        Default: the last measured time plus ``t_offset``.
     calibration : object or None
         Passed through to the forward model.
     objective : {'relative', 'absolute'}
         'relative' (default) uses Yang et al. 2006 eq 14 — the RMS
         *relative* error (residual weighted by 1/γ_exp).  'absolute' uses
         the plain γ_sim − γ_exp misfit.  See ``ift_residuals``.
+    t_offset : float
+        Seconds between drop formation and the measured clock's zero,
+        added to every measured time (Yang's code uses 2 s).  Default 0.
     verbose : bool
         Print optimiser progress.
 
@@ -249,13 +290,11 @@ def estimate_D_k(fem_results, domain_metadata, t_exp, gamma_exp,
         raise ValueError("objective must be 'relative' or 'absolute'")
     relative = (objective == 'relative')
 
-    t_exp = np.asarray(t_exp, dtype=float)
+    t_exp = _model_times(t_exp, t_offset)
     gamma_exp = _validate_gamma_exp(gamma_exp)
 
     if total_time is None:
         total_time = float(t_exp.max())
-    if dtau is None:
-        dtau = total_time / N_FIT_STEPS
 
     lb = np.log10([bounds[0][0], bounds[1][0]])
     ub = np.log10([bounds[0][1], bounds[1][1]])
@@ -319,6 +358,8 @@ def estimate_D_k_yang(fem_results, domain_metadata, t_exp, gamma_exp,
                       dtau=None, total_time=None,
                       n_D_scan=25, refine=True, scan_D=True,
                       auto_widen=True, max_widen=4, widen_factor=10.0,
+                      t_offset=0.0,
+                      near_tol=NEAR_FIT_TOL,
                       should_cancel=None,
                       verbose=False):
     """
@@ -364,6 +405,13 @@ def estimate_D_k_yang(fem_results, domain_metadata, t_exp, gamma_exp,
     auto_widen : bool            – expand an edge-hit bound and re-sweep.
     max_widen : int              – max auto-widen attempts.
     widen_factor : float         – multiplicative bound expansion per attempt.
+    dtau : float or None         – None (default): graded time steps; a
+                                   number: uniform forward-run step (s).
+    t_offset : float             – seconds between drop formation and the
+                                   measured clock's zero, added to every
+                                   measured time (Yang's code: 2 s).
+    near_tol : float             – relative E tolerance for the "equally
+                                   good fits" range (see 'D_near').
     should_cancel : callable() -> bool or None
                                  – polled before every forward simulation; if
                                    it returns True the fit unwinds with
@@ -394,6 +442,14 @@ def estimate_D_k_yang(fem_results, domain_metadata, t_exp, gamma_exp,
                             is the paper's Figure 7b (Fig 7a is E vs D at
                             several kD, for one pressure).  None when
                             ``scan_D`` is False
+        'D_near', 'kD_near' – (lo, hi): the span of all evaluated (D, kD)
+                            whose E ≤ E_min·(1 + near_tol) — fits the data
+                            cannot tell apart from the best one
+        'near_open'       – True if that span reaches the edge of the
+                            searched kD range, so it may extend further
+        'D_well_determined' – D_near spans ≤ D_WELL_DETERMINED_RATIO and
+                            is not open-ended
+        't_offset'        – the time offset used (s)
 
     Raises
     ------
@@ -404,26 +460,65 @@ def estimate_D_k_yang(fem_results, domain_metadata, t_exp, gamma_exp,
     D_bounds = list(GENERAL_D_BOUNDS if D_bounds is None else D_bounds)
 
     r_n = float(domain_metadata.get('r_inner_m', 1e-3))
-    t_exp = np.asarray(t_exp, dtype=float)
+    t_exp = _model_times(t_exp, t_offset)
     gamma_exp = _validate_gamma_exp(gamma_exp)
     if total_time is None:
         total_time = float(t_exp.max())
-    if dtau is None:
-        dtau = total_time / N_FIT_STEPS
 
     n_calls = [0]
 
-    def E_at(D, kD):
-        """Objective for a (D, kD) pair: convert to physical k = kD·D/rₙ,
-        run the forward model, return Yang's relative-error E."""
+    # One simulation per kD (D. Yang's own trick, 2005 thesis App. D.3).
+    # In dimensionless time τ = D·t/rₙ² the model depends on kD only, so a
+    # single run per kD gives Cs(τ), and every D is then just a rescaling of
+    # the measured times — no new simulation.  The run covers τ up to the
+    # largest D in the (possibly auto-widened) box.  Only with the default
+    # graded stepping: a uniform step in *seconds* is a different τ-step for
+    # every D, so an explicit ``dtau`` keeps one simulation per (D, kD).
+    fast = dtau is None
+    tau_cache = {}
+    D_REF = 1e-9
+    # The shared run spans the whole D box, so it is finer than a per-D run:
+    # within 0.01–0.03 mN/m of a converged reference on the test domain
+    # (more accurate than a direct graded run at the same (D, k)).
+    TAU_RUN_SCHEDULE = dict(steps_per_block=20, min_steps=1000)
+
+    def tau_curve(kD):
+        tau_end = D_bounds[1] * total_time / r_n ** 2
+        key = (float(kD), tau_end)
+        if key not in tau_cache:
+            if should_cancel is not None and should_cancel():
+                raise EstimationCancelled()
+            n_calls[0] += 1
+            k_ref = kD * D_REF / r_n
+            sim = solve_diffusion(
+                _rescale_fem_system(fem_results, D_REF, k_ref), domain_metadata,
+                D=D_REF, k=k_ref, stepping='graded',
+                total_time=tau_end * r_n ** 2 / D_REF,
+                snapshot_steps=[], progress_cb=None, calibration=None,
+                schedule_kw=TAU_RUN_SCHEDULE, verbose=False)
+            tau = np.r_[0.0, np.asarray(sim['time_history']) * D_REF / r_n ** 2]
+            tau_cache[key] = (tau, np.r_[0.0, sim['Cs_history']])
+        return tau_cache[key]
+
+    def model_gamma(D, kD):
+        """γ_sim on the measured times for one (D, kD)."""
+        if fast:
+            tau, Cs = tau_curve(kD)
+            Cs_t = np.interp(D * t_exp / r_n ** 2, tau, Cs)
+            return (calibration.gamma(Cs_t) if calibration is not None
+                    else compute_gamma(Cs_t))
         if should_cancel is not None and should_cancel():
             raise EstimationCancelled()
-        k = kD * D / r_n
         n_calls[0] += 1
-        gamma_sim = simulate_ift(fem_results, domain_metadata, D, k, t_exp,
-                                 dtau=dtau, total_time=total_time,
-                                 calibration=calibration)
-        return _relative_E(gamma_sim, gamma_exp)
+        return simulate_ift(fem_results, domain_metadata, D, kD * D / r_n,
+                            t_exp, dtau=dtau, total_time=total_time,
+                            calibration=calibration)
+
+    def E_at(D, kD):
+        """Objective for a (D, kD) pair: Yang's relative-error E."""
+        if should_cancel is not None and should_cancel():
+            raise EstimationCancelled()
+        return _relative_E(model_gamma(D, kD), gamma_exp)
 
     def best_D_for(kD, logD_lo, logD_hi):
         """Inner 1-D search: minimise E over D (in log10 space) at fixed
@@ -529,10 +624,23 @@ def estimate_D_k_yang(fem_results, domain_metadata, t_exp, gamma_exp,
         sweep_D = None
 
     # --- final curve + absolute misfit at the optimum ----------------
-    gamma_fit = simulate_ift(fem_results, domain_metadata, D_best, k_best,
-                             t_exp, dtau=dtau, total_time=total_time,
-                             calibration=calibration)
+    # Same forward path as the search, so γ_fit matches E_percent exactly.
+    gamma_fit = model_gamma(D_best, kD_best)
     abs_resid = gamma_fit - gamma_exp
+
+    # --- fits the data cannot tell apart from the best one -----------
+    # The kD sweep already holds the best D at every kD tried, i.e. a trace
+    # along the bottom of the E(D, kD) valley.  Every point within near_tol
+    # of E_min is an equally defensible answer; their span is the honest
+    # uncertainty of D and kD from this curve alone.
+    near = E_arr <= E_best * (1.0 + near_tol)
+    D_near = (float(D_arr[near].min()), float(D_arr[near].max()))
+    kD_near = (float(kD_arr[near].min()), float(kD_arr[near].max()))
+    near_open = bool(
+        near[0] or near[-1]
+        or np.any(np.abs(np.log10(D_arr[near]) - np.log10(D_bounds[0])) < EDGE_TOL_LOG10)
+        or np.any(np.abs(np.log10(D_arr[near]) - np.log10(D_bounds[1])) < EDGE_TOL_LOG10))
+    D_well = (D_near[1] / D_near[0] <= D_WELL_DETERMINED_RATIO) and not near_open
 
     success = not on_edge
     if success:
@@ -567,4 +675,7 @@ def estimate_D_k_yang(fem_results, domain_metadata, t_exp, gamma_exp,
         gamma_fit=gamma_fit,
         sweep_kD=dict(kD=kD_arr, E=E_arr * 100.0, D=D_arr),
         sweep_D=sweep_D,
+        D_near=D_near, kD_near=kD_near, near_tol=near_tol,
+        near_open=near_open, D_well_determined=bool(D_well),
+        t_offset=float(t_offset),
     )
