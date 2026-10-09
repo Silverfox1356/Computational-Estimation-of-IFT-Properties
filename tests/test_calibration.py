@@ -105,8 +105,11 @@ def test_recovery_with_real_calibration():
 
     D_true, k_true, T = 0.77e-9, 2.69e-5, 200.0   # Yang Table 2 @ 3.67 MPa
     t_exp = np.linspace(2.0, T, 60)
+    # Same forward model the fit uses (graded steps).  Generating with the
+    # old uniform dt = 1 s instead biases the recovered D by ~11 % — that is
+    # the old scheme's discretisation error, not a calibration problem.
     gamma_true = simulate_ift(fem, meta, D_true, k_true, t_exp,
-                              dtau=1.0, total_time=T, calibration=cal)
+                              total_time=T, calibration=cal)
     rng = np.random.default_rng(7)
     gamma_exp = gamma_true + rng.normal(0.0, 0.05, t_exp.size)
 
