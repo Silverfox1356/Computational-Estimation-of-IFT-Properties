@@ -1,0 +1,155 @@
+"""
+gui.shell.nodes
+===============
+
+The Analysis Builder tree: which nodes exist and what state each is in.
+
+Kept free of Qt so the rules can be tested without a display.  A status is
+one of :data:`STATUSES`; every status comes with a one-line reason that the
+tree shows as a tooltip, so a greyed-out node always says why.
+"""
+
+from collections import namedtuple
+from pathlib import Path
+
+Node = namedtuple('Node', 'key parent label icon')
+
+NODES = (
+    Node('session', None, 'Session', 'project'),
+    Node('global', 'session', 'Global Definitions', 'global'),
+    Node('fluids', 'global', 'Fluids & Needle', 'params'),
+    Node('calibration', 'global', 'IFT Calibration Curve γ(c)', 'calcurve'),
+    Node('source', 'session', 'Source', 'video'),
+    Node('crop', 'source', 'Crop', 'crop'),
+    Node('threshold', 'source', 'Threshold', 'threshold'),
+    Node('logger', 'session', 'Frame Logger', 'series'),
+    Node('scale', 'logger', 'Scale Calibration', 'ruler'),
+    Node('baseline', 'logger', 'Baseline', 'baseline'),
+    Node('log', 'session', 'Frame Log', 'table'),
+    Node('analyses', 'session', 'Analyses', 'compute'),
+    Node('swelling', 'analyses', 'Swelling Check', 'swell'),
+    Node('yang', 'analyses', 'Diffusivity (Yang)', 'inv'),
+    Node('yang_model', 'yang', 'Model: Geometry, Mesh, FEM', 'mesh'),
+    Node('bagalkot', 'analyses', 'Diffusivity (Bagalkot)', 'inv'),
+    Node('results', 'session', 'Results', 'plot'),
+    Node('report', 'results', 'Report', 'report'),
+)
+NODE = {n.key: n for n in NODES}
+
+# complete, ready to run, needs input, warning, not available, out of date
+STATUSES = ('done', 'ready', 'input', 'warn', 'off', 'stale')
+STATUS_LABELS = dict(done='Complete', ready='Ready', input='Needs input',
+                     warn='Warning', off='Not available', stale='Out of date')
+
+
+def children(key):
+    return [n for n in NODES if n.parent == key]
+
+
+def node_statuses(folder):
+    """{node key: (status, reason)} for an open SessionFolder, or for no
+    session when ``folder`` is None."""
+    if folder is None:
+        out = {n.key: ('off', 'No session is open.') for n in NODES}
+        out['session'] = ('input', 'Open a session folder to begin.')
+        return out
+
+    s = folder.session
+    log = folder.log
+    codes = {p.code: p for p in folder.problems}
+    st = {}
+
+    st['fluids'] = ('done', f"{s.fluids.get('name') or 'Fluids'}: inner "
+                    f"{s.fluids['density_inner']:g} kg/m3, outer "
+                    f"{s.fluids['density_outer']:g} kg/m3; needle "
+                    f"{s.needle['od_mm']:g} mm")
+    if 'calibration_missing' in codes:
+        st['calibration'] = ('warn', codes['calibration_missing'].message)
+    elif folder.calibration_path is not None:
+        st['calibration'] = ('done', 'Calibration curve stored in the session.')
+    else:
+        st['calibration'] = ('ready', 'Optional: only Diffusivity (Yang) needs it.')
+    st['global'] = _worst(st, 'global')
+
+    src = s.source
+    name = src.get('name') or src.get('path') or src.get('kind')
+    if src.get('kind') == 'video' and src.get('path') and not Path(src['path']).is_file():
+        st['source'] = ('warn', f"The video is no longer at {src['path']}; the "
+                        f"stored frames are still usable.")
+    else:
+        st['source'] = ('done', f"{src.get('kind', '').capitalize()}: {name}")
+    crops = [a for op, a in s.prep_ops if op == 'crop']
+    thr = [a for op, a in s.prep_ops if op == 'threshold']
+    st['crop'] = ('done', f"Cropped to {crops[-1][2]} x {crops[-1][3]} px" if crops
+                  else 'No crop: the whole frame is used.')
+    st['threshold'] = ('done', f"Threshold level {thr[-1]}" if thr
+                       else 'No fixed threshold: automatic (Otsu) per frame.')
+
+    st['scale'] = ('done', f"{s.scale['pixel_to_m'] * 1e6:.4g} um/px "
+                   f"({s.scale.get('method', 'unknown method')})")
+    st['baseline'] = ('done', f"y = {s.baseline['y_px']:g} px "
+                      f"({s.baseline.get('method', 'unknown method')})")
+    if 'log_unfinished' in codes:
+        st['logger'] = ('warn', codes['log_unfinished'].message)
+    elif len(log) == 0 and not folder.frame_indices():
+        st['logger'] = ('input', 'No frames logged yet.')
+    else:
+        st['logger'] = ('done', f"{len(log)} frame(s) logged.")
+
+    log_problems = [p for p in folder.problems
+                    if p.code not in ('calibration_missing', 'log_unfinished')]
+    if log_problems:
+        st['log'] = ('warn', log_problems[0].message)
+    else:
+        n_ok = sum(1 for r in log.rows if r['fit_ok'])
+        st['log'] = ('done', f"{len(log)} row(s), {n_ok} measured.")
+
+    avail = folder.availability()
+    for key in ('swelling', 'yang', 'bagalkot'):
+        ok, why = avail[key]
+        if not ok:
+            st[key] = ('off', why)
+        elif folder.load_analysis(key) is not None:
+            st[key] = (('stale', 'The log changed since this analysis ran; run it again.')
+                       if folder.analysis_out_of_date(key)
+                       else ('done', 'Results stored in the session.'))
+        else:
+            st[key] = ('ready', 'Ready to run.')
+    st['yang_model'] = (('off', 'Available once Diffusivity (Yang) can run.')
+                        if st['yang'][0] == 'off'
+                        else ('ready', 'Built from the first measured frame.'))
+    if all(st[k][0] == 'off' for k in ('swelling', 'yang', 'bagalkot')):
+        st['analyses'] = ('off', 'No analysis can run on this session yet.')
+    else:
+        st['analyses'] = _worst(st, 'analyses')
+
+    st['report'] = ('off', 'Run an analysis first.')
+    st['results'] = ('off', 'Run an analysis first.')
+    worst = _worst(st, None, keys=[k for k in st])
+    st['session'] = (worst[0] if worst[0] in ('warn', 'input') else 'done',
+                     worst[1] if worst[0] in ('warn', 'input') else
+                     f"{len(log)} frame(s) logged.")
+    return st
+
+
+_ORDER = ('warn', 'input', 'stale', 'ready', 'done', 'off')
+
+
+def _worst(st, parent, keys=None):
+    keys = keys if keys is not None else [n.key for n in children(parent)]
+    vals = [st[k] for k in keys if k in st and st[k][0] != 'off']
+    if not vals:
+        return ('off', 'Nothing here can run yet.')
+    for status in _ORDER:
+        for v in vals:
+            if v[0] == status:
+                return v if status in ('warn', 'input', 'stale') else (status, '')
+    return vals[0]
+
+
+def next_required(statuses):
+    """First node (tree order) that needs input or has a warning, or None."""
+    for n in NODES:
+        if n.key != 'session' and statuses.get(n.key, ('off',))[0] in ('input', 'warn'):
+            return n.key
+    return None

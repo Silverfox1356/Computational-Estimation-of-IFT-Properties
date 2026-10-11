@@ -10,7 +10,7 @@ class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("Drop Analysis Software")
-        fit_to_screen(self, 400, 350)
+        fit_to_screen(self, 420, 420)
 
         central_widget = QWidget()
         self.setCentralWidget(central_widget)
@@ -44,6 +44,15 @@ class MainWindow(QMainWindow):
         layout.addWidget(self.sessile_btn)
         layout.addWidget(self.pendant_btn)
 
+        # New interface (UI overhaul), shown next to the old windows until
+        # every analysis has moved over.
+        self.studio_btn = QPushButton("Drop Analysis Studio (new interface, preview)")
+        self.studio_btn.setMinimumHeight(40)
+        self.studio_btn.setToolTip("Open session folders: logged frames, the frame "
+                                   "log and its plots")
+        layout.addWidget(self.studio_btn)
+        self.studio_btn.clicked.connect(self.open_studio)
+
         self.sessile_btn.clicked.connect(self.open_sessile)
         self.pendant_btn.clicked.connect(self.open_pendant)
 
@@ -57,6 +66,11 @@ class MainWindow(QMainWindow):
         # Pass the chosen camera type into the window
         self.sessile_window = SessileWindow(camera_type=self.get_selected_camera())
         self.sessile_window.show()
+
+    def open_studio(self):
+        from gui.shell.main_window import StudioWindow
+        self.studio_window = StudioWindow()
+        self.studio_window.show()
 
     def open_pendant(self):
         # Pass the chosen camera type into the window
