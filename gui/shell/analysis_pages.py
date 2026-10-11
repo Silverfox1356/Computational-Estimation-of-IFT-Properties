@@ -70,8 +70,13 @@ class AnalysisPages:
             lay.addWidget(callout(f"The stored result can't be read: {doc['error']}"))
             return False
         if folder.analysis_out_of_date(name):
-            lay.addWidget(callout('The frame log changed since this ran (for example it was '
-                                  'rebuilt), so this result is out of date. Run it again.'))
+            if (doc.get('data') or {}).get('settings', {}).get('curve') == 'file':
+                lay.addWidget(callout('The IFT curve file changed since this ran, so this '
+                                      'result is out of date. Run it again.'))
+            else:
+                lay.addWidget(callout('The frame log changed since this ran (for example it '
+                                      'was rebuilt), so this result is out of date. Run it '
+                                      'again.'))
         return True
 
     # -- single-frame IFT -------------------------------------------------------------
@@ -196,14 +201,12 @@ class AnalysisPages:
 
     # -- Yang -------------------------------------------------------------------------
     def page_yang(self, folder, lay):
-        ok = self._header(folder, 'yang', f"IFT against time from the log (frames that passed "
-                          f"QC, at least {YANG_MIN_POINTS}), the first measured frame (drop "
-                          f"geometry) and the gamma(c) calibration", lay)
-        if not (folder.calibration_path and folder.calibration_path.is_file()):
-            lay.addWidget(_row(_button('Load calibration...', 'calcurve',
-                                       lambda: self.w.select_node('calibration'))))
         doc = self._doc(folder, 'yang')
         st = (doc or {}).get('data', {}).get('settings', {})
+        frame, from_log, from_file, can_run = self._yang_inputs(folder, st, lay)
+
+        def curve():
+            return 'file' if from_file.isChecked() else 'log'
         sec = Section('Search range')
         auto = QRadioButton('Automatic')
         auto.setToolTip('The range widens until the minimum is inside it')
@@ -221,7 +224,8 @@ class AnalysisPages:
                            ('kD from', k_lo), ('kD to', k_hi)):
             sec.form.addRow(label, wdg)
         offset = _spin(st.get('t_offset', 0.0), -1e5, 1e5, 2, 1, ' s')
-        offset.setToolTip('Shift of the log times, if the drop formed before t = 0 of the log')
+        offset.setToolTip('Added to the times of the IFT curve, if the drop formed before '
+                          't = 0 of the curve (Yang et al. added 2 s)')
         sec.form.addRow('Time offset', offset)
 
         def toggle():
@@ -234,7 +238,7 @@ class AnalysisPages:
                            "forward simulations of the diffusion model; this takes minutes."))
 
         def run():
-            kw = dict(t_offset=offset.value())
+            kw = dict(t_offset=offset.value(), curve=curve(), frame_index=frame.currentData())
             if manual.isChecked():
                 try:
                     kw.update(D_bounds=(_sci(d_lo.text(), 'D from'), _sci(d_hi.text(), 'D to')),
@@ -243,7 +247,17 @@ class AnalysisPages:
                     self.w.messages.add(str(e), 'warn')
                     return
             self.w.run_analysis('yang', **kw)
-        lay.addWidget(_row(self._run_button(ok, run)))
+        run_b = self._run_button(True, run)
+        busy = self.w.job_running()
+
+        def update():
+            ok, why = folder.yang_availability(curve())
+            run_b.setEnabled(ok and not busy)
+            can_run.setText('Yes' if ok else f"No: {why}")
+        for r in (from_log, from_file):
+            r.toggled.connect(lambda _: update())
+        update()
+        lay.addWidget(_row(run_b))
         if not self._stored_notes(folder, 'yang', doc, lay):
             return
         r = doc['data']['result']
@@ -265,15 +279,85 @@ class AnalysisPages:
                   f"{fmt(r['D_near'][0], 3)} to {fmt(r['D_near'][1], 3)}{more}", 'm2/s')
         sec.field('Equally good kD', f"{fmt(r['kD_near'][0], 3)} to {fmt(r['kD_near'][1], 3)}")
         sec.field('Simulations', r['n_evaluations'] + r.get('n_scan_evaluations', 0))
+        st_ = doc['data'].get('settings', {})
+        m = doc['data'].get('model', {})
+        sec.field('IFT curve from', 'the file ift_curve.csv' if st_.get('curve') == 'file'
+                  else 'the frame log')
+        sec.field('Drop outline from', f"frame {m.get('frame_index')}")
         lay.addWidget(sec)
         lay.addWidget(_row(_button('Show the fit', 'plot', lambda: self.w.graphics.show_result('yang')),
                            _button('Show the mesh', 'mesh', lambda: self.w.graphics.show_result('mesh'))))
+
+    def _yang_inputs(self, folder, st, lay):
+        """The three inputs of Yang's method: the drop outline (one frame), the
+        gamma(c) calibration and IFT against time (the log, or a file)."""
+        from PyQt6.QtWidgets import QLabel
+        sec = Section('Inputs')
+        sec.widget(note("Yang et al. 2006 needs the outline of the drop (one frame is enough), "
+                        "the gamma(c) calibration and the IFT of the same drop against time."))
+        frames = folder.measured_frames()
+        combo = QComboBox()
+        for r in frames:
+            combo.addItem(f"Frame {r['frame_index']}, t = {fmt(r['time_s'])} s", r['frame_index'])
+        if not frames:
+            combo.addItem('No frame with a successful fit', None)
+        combo.setEnabled(len(frames) > 1)
+        combo.setToolTip('The frame whose outline becomes the model geometry (mesh, FEM). '
+                         'Yang et al. used the drop just after it formed.')
+        want = st.get('frame_index')
+        k = combo.findData(want) if want is not None else -1
+        combo.setCurrentIndex(max(k, 0))
+        combo.currentIndexChanged.connect(
+            lambda i: self.w._show_frame(combo.itemData(i)) if combo.itemData(i) is not None
+            else None)
+        sec.form.addRow('Drop outline from', combo)
+        has_cal = bool(folder.calibration_path and folder.calibration_path.is_file())
+        sec.field('gamma(c) calibration', 'stored in the session' if has_cal else 'not loaded')
+        if not has_cal:
+            sec.widget(_row(_button('Load calibration...', 'calcurve', self.w.load_calibration)))
+        lay.addWidget(sec)
+
+        sec = Section('IFT against time')
+        n_log = sum(1 for r in folder.log.rows if r['qc_pass'] and r['ift_mNm'] == r['ift_mNm']
+                    and (r['ift_mNm'] or 0) > 0) if folder.log.has('ift_mNm') else 0
+        from_log = QRadioButton(f"Frame log ({n_log} frame{'s' if n_log != 1 else ''} passed QC)")
+        from_log.setToolTip(f"The IFT of the logged frames; needs at least {YANG_MIN_POINTS}")
+        from_file = QRadioButton('IFT curve file (CSV)')
+        from_file.setToolTip('IFT against time measured for this drop by another instrument or '
+                             'program, for example when only one image of the drop was logged')
+        grp = QButtonGroup(sec)
+        grp.addButton(from_log)
+        grp.addButton(from_file)
+        curve = st.get('curve') or ('log' if folder.yang_availability('log')[0] else 'file')
+        (from_file if curve == 'file' else from_log).setChecked(True)
+        sec.widget(from_log)
+        sec.widget(from_file)
+        try:
+            c = folder.ift_curve()
+            info = ('none loaded' if c is None else
+                    f"{len(c['t'])} points, t = {fmt(c['t'][0])} to {fmt(c['t'][-1])} s, "
+                    f"IFT {fmt(c['gamma'].min())} to {fmt(c['gamma'].max())} mN/m")
+        except SessionError as e:
+            info = str(e)
+        sec.field('Curve file', info)
+        sec.widget(_row(_button('Load IFT curve (CSV)...', 'series', self.w.load_ift_curve,
+                                tip='Copied into the session folder as ift_curve.csv'),
+                        _button('Save template...', 'save', self.w.save_ift_template,
+                                tip='A CSV with the expected columns (time_s, ift_mNm) '
+                                    'and example rows')))
+        can = QLabel()
+        can.setWordWrap(True)
+        can.setObjectName('FieldValue')
+        sec.form.addRow('Can run', can)
+        lay.addWidget(sec)
+        return combo, from_log, from_file, can
 
     def page_yang_model(self, folder, lay):
         doc = self._doc(folder, 'yang')
         if not doc or 'error' in doc:
             lay.addWidget(note('The diffusion model (geometry, mesh, FEM system) is built from '
-                               'the first measured frame when Diffusivity (Yang) runs.'))
+                               'the drop outline of the frame chosen in Diffusivity (Yang) '
+                               'when it runs.'))
             return
         m = doc['data']['model']
         sec = Section('Model')

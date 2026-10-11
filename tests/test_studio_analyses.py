@@ -87,7 +87,7 @@ def run(tmp):
 
     check("session opens", w.open_session(str(folder.path)))
     check("analyses ready", all(w.statuses[k][0] == 'ready' for k in ('swelling', 'bagalkot')))
-    check("yang waits for a calibration", w.statuses['yang'][0] == 'off'
+    check("yang waits for a calibration", w.statuses['yang'][0] == 'input'
           and 'calibration' in w.statuses['yang'][1])
     check("ribbon analysis buttons enabled", w.a_swell.isEnabled() and w.a_bagalkot.isEnabled())
     errors = []
@@ -142,7 +142,7 @@ def run(tmp):
     calib.write_text(CALIB, encoding='utf-8')
     w.load_calibration(str(calib))
     n_qc = sum(r['qc_pass'] for r in w.folder.log.rows)
-    if w.statuses['yang'][0] == 'off':
+    if w.statuses['yang'][0] in ('off', 'input'):
         check("yang explains why it can't run", 'QC' in w.statuses['yang'][1] or n_qc < 10,
               w.statuses['yang'][1])
     else:
@@ -172,6 +172,51 @@ def run(tmp):
         doc = w.folder.load_analysis('yang')
         check("stopped run kept the earlier result", doc is not None
               and doc['data']['result']['D'] == D_before)
+
+    print("── Yang on a single image + IFT curve file ──")
+    from PyQt6.QtWidgets import QLineEdit, QRadioButton
+    from _synthetic_video import render_drop
+    from core.session import SessionFolder
+    from test_analyses import ROOT, session
+    one = SessionFolder.create(tmp / 'one', session(kind='image'))
+    one.log_image(render_drop(0.30, 70)[0])
+    one.finish()
+    w.close_current()
+    check("one-image session opens", w.open_session(str(one.path)))
+    check("Yang asks for input (not greyed out)", w.statuses['yang'][0] == 'input',
+          str(w.statuses['yang']))
+    check("the session itself is not flagged", w.statuses['session'][0] != 'input',
+          str(w.statuses['session']))
+    w.select_node('yang')
+
+    def radio(text):
+        return next(r for r in w.settings.widget().findChildren(QRadioButton)
+                    if r.text().startswith(text))
+    check("IFT curve file chosen by default", radio('IFT curve file').isChecked())
+    check("Run disabled without calibration and curve", not button('Run').isEnabled())
+    w.load_calibration(str(calib))
+    w.load_ift_curve(str(ROOT / 'data' / 'ift_curve_5.67MPa.csv'))
+    check("curve copied into the session", w.folder.ift_curve_path is not None)
+    check("Yang ready", w.statuses['yang'][0] == 'ready', str(w.statuses['yang']))
+    w.select_node('yang')
+    check("Run enabled", button('Run').isEnabled())
+    radio('Frame log').setChecked(True)
+    check("Run disabled for the frame log route", not button('Run').isEnabled())
+    radio('IFT curve file').setChecked(True)
+    radio('Manual').setChecked(True)
+    for e, v in zip(w.settings.widget().findChildren(QLineEdit), ('1e-10', '1e-8', '0.5', '50')):
+        e.setText(v)
+    button('Run').click()
+    check("Yang ran", wait_job())
+    doc = w.folder.load_analysis('yang')
+    check("stored with the curve file as source", doc is not None
+          and doc['data']['settings']['curve'] == 'file'
+          and doc['data']['settings']['frame_index'] == 0)
+    check("Yang Fit and Mesh tabs", {'Yang Fit', 'Mesh'} <= set(tabs()), str(tabs()))
+    w.select_node('yang')
+    labels = [l.text() for l in w.settings.widget().findChildren(__import__(
+        'PyQt6.QtWidgets', fromlist=['QLabel']).QLabel)]
+    check("result page names the curve file", 'the file ift_curve.csv' in labels)
     check("no unexpected warnings", not warnings, '; '.join(map(str, warnings)))
     w.close()
 

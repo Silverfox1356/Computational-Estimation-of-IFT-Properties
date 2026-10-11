@@ -21,7 +21,9 @@ import numpy as np
 from _synthetic_video import render_drop, write_swelling_video
 from core import analyses as A
 from core.frame_series import FrameSeriesCancelled, sample_times
-from core.session import Session, SessionFolder
+from core.session import Session, SessionError, SessionFolder
+
+ROOT = Path(__file__).resolve().parent.parent
 
 _passed = 0
 _failed = 0
@@ -85,6 +87,8 @@ def run(tmp):
     one.finish()
     for name in ('swelling', 'bagalkot', 'yang'):
         check(f"{name} refuses a single image", raises(lambda n=name: A.RUNNERS[n](one)))
+
+    single_image_yang(tmp, one)
 
     f = series_folder(tmp)
     n_qc = sum(r['qc_pass'] for r in f.log.rows)
@@ -161,6 +165,49 @@ def run(tmp):
     f.rebuild_log(prep_ops=[('threshold', 110)])
     check("threshold rebuild marks results out of date",
           all(f.analysis_out_of_date(n) for n in ('swelling', 'bagalkot', 'yang')))
+
+
+def single_image_yang(tmp, one):
+    """Yang on one logged image: the outline from that frame, IFT(t) from a
+    CSV (as the Pendant window's Static mode with Load IFT curve)."""
+    print("── Yang on a single image + IFT curve file ──")
+    calib = tmp / 'calib1.csv'
+    calib.write_text(CALIB, encoding='utf-8')
+    one.set_calibration(calib)
+    ok, why = one.yang_availability()
+    check("single image without a curve: Yang asks for one", not ok and 'IFT curve' in why, why)
+    bad = tmp / 'bad.csv'
+    bad.write_text("time_s,ift_mNm\n1,abc\n", encoding='utf-8')
+    check("a bad curve file is refused", raises(lambda: one.set_ift_curve(bad), SessionError))
+    check("nothing stored after the refusal", one.ift_curve_path is None)
+    src = ROOT / 'data' / 'ift_curve_5.67MPa.csv'
+    c = one.set_ift_curve(src)
+    check("curve copied into the session", one.ift_curve_path is not None
+          and one.ift_curve_path.read_bytes() == src.read_bytes(), f"{len(c['t'])} points")
+    check("file route available", one.yang_availability('file') == (True, ''))
+    check("log route still refused", not one.yang_availability('log')[0],
+          one.yang_availability('log')[1])
+    check("log route refused by run_yang", raises(lambda: A.run_yang(one, curve='log')))
+    check("unknown frame refused",
+          raises(lambda: A.run_yang(one, curve='file', frame_index=99, kD_range=(0.5, 50.0),
+                                    D_bounds=(1e-10, 1e-8))))
+    t0 = time.time()
+    d = A.run_yang(one, curve='file', frame_index=0, kD_range=(0.5, 50.0),
+                   D_bounds=(1e-10, 1e-8), t_offset=2.0)
+    r = d['result']
+    check("Yang ran on one image + the curve file", np.isfinite(r['D']) and np.isfinite(r['k']),
+          f"D = {r['D']:.3e} m2/s, k = {r['k']:.3e} m/s in {time.time() - t0:.0f} s")
+    check("fitted on the file's points", len(d['curve']['t']) == len(c['t'])
+          and np.allclose(d['curve']['gamma_exp'], c['gamma']))
+    check("outline from frame 0", d['model']['frame_index'] == 0)
+    st = d['settings']
+    check("curve source stored", st['curve'] == 'file' and st['frame_index'] == 0
+          and len(st['curve_sha256']) == 64)
+    check("result is current", not one.analysis_out_of_date('yang'))
+    edited = tmp / 'edited.csv'
+    edited.write_text(src.read_text(encoding='utf-8').replace('39.782', '39.700'), encoding='utf-8')
+    one.set_ift_curve(edited)
+    check("a new curve file marks the result out of date", one.analysis_out_of_date('yang'))
 
 
 if __name__ == "__main__":

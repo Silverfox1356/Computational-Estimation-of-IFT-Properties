@@ -881,6 +881,54 @@ class StudioWindow(QMainWindow):
                           f"{'will be copied' if self.draft else 'copied'} into the session.", 'ok')
         self.refresh_status()
 
+    def load_ift_curve(self, path=None):
+        """Copy an IFT-vs-time CSV into the open session for Diffusivity (Yang)."""
+        folder = self.folder
+        if folder is None:
+            return
+        if not isinstance(path, (str, Path)) or not str(path):
+            path = None
+        if path is None:
+            path, _ = QFileDialog.getOpenFileName(
+                self, 'Load IFT curve', self.store.value('last_dir', str(Path.home())),
+                'CSV files (*.csv);;All files (*)')
+            if not path:
+                return
+            self.store.setValue('last_dir', str(Path(path).parent))
+        if folder.ift_curve_path is not None and QMessageBox.question(
+                self, 'Replace the IFT curve?',
+                f"Replace the IFT curve stored in this session with {Path(path).name}?"
+        ) != QMessageBox.StandardButton.Yes:
+            return
+        try:
+            c = folder.set_ift_curve(path)
+        except (SessionError, OSError) as e:
+            self.messages.add(str(e), 'error')
+            QMessageBox.warning(self, 'IFT curve not loaded', str(e))
+            return
+        self.messages.add(f"IFT curve {Path(path).name}: {len(c['t'])} points copied into "
+                          f"the session.", 'ok')
+        for w in c['warnings']:
+            self.messages.add(w, 'warn')
+        self.refresh_status()
+
+    def save_ift_template(self):
+        """Save the IFT-curve CSV template (columns and example rows)."""
+        src = Path(__file__).resolve().parent.parent.parent / 'data' / 'ift_curve_template.csv'
+        dest, _ = QFileDialog.getSaveFileName(
+            self, 'Save IFT curve template',
+            str(Path(self.store.value('last_dir', str(Path.home()))) / 'ift_curve_template.csv'),
+            'CSV files (*.csv)')
+        if not dest:
+            return
+        try:
+            shutil.copyfile(src, dest)
+        except OSError as e:
+            QMessageBox.warning(self, 'Template not saved', str(e))
+            return
+        self.messages.add(f"Template saved to {dest}. Replace the example rows with your "
+                          f"own data, then Load IFT curve (CSV).", 'ok')
+
     def export_log(self):
         if self.folder is None:
             return

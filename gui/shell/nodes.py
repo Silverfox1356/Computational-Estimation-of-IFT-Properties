@@ -87,6 +87,9 @@ def draft_statuses(draft):
     else:
         st['logger'] = ('ready', 'Ready to start logging.')
     st['log'] = ('off', 'Nothing logged yet.')
+    if draft.kind == 'image':
+        st['yang'] = ('off', 'Start logging saves the image as a one-frame session; Diffusivity '
+                      '(Yang) can then use its drop outline with an IFT curve file (CSV).')
     if 'scale' in missing or 'baseline' in missing:
         st['frame_ift'] = ('off', 'Set the scale and the baseline first.')
     elif draft.preview and draft.preview.get('fit_ok'):
@@ -162,7 +165,9 @@ def node_statuses(folder):
     avail = folder.availability()
     for key in ('swelling', 'yang', 'bagalkot'):
         ok, why = avail[key]
-        if not ok:
+        if not ok and key == 'yang' and folder.measured_frames():
+            st[key] = ('input', why)        # one drop outline is enough; it needs a curve
+        elif not ok:
             st[key] = ('off', why)
         elif folder.load_analysis(key) is not None:
             if folder.analysis_out_of_date(key):
@@ -173,8 +178,8 @@ def node_statuses(folder):
         else:
             st[key] = ('ready', 'Ready to run.')
     st['yang_model'] = (('off', 'Available once Diffusivity (Yang) can run.')
-                        if st['yang'][0] == 'off'
-                        else ('ready', 'Built from the first measured frame.'))
+                        if st['yang'][0] in ('off', 'input')
+                        else ('ready', 'Built from the drop outline of one frame when Yang runs.'))
     if all(st[k][0] == 'off' for k in ('swelling', 'yang', 'bagalkot')):
         st['analyses'] = ('off', 'No analysis can run on this session yet.')
     else:
@@ -190,7 +195,9 @@ def node_statuses(folder):
     else:
         st['results'] = ('off', 'Run an analysis first.')
     st['report'] = ('off', 'The printable report is the next step of the overhaul.')
-    worst = _worst(st, None, keys=[k for k in st])
+    # A Yang step waiting for an IFT curve is optional work, not a fault of the session.
+    worst = _worst(st, None, keys=[k for k in st if not (k in ('yang', 'analyses')
+                                                         and st[k][0] == 'input')])
     st['session'] = (worst[0] if worst[0] in ('warn', 'input') else 'done',
                      worst[1] if worst[0] in ('warn', 'input') else
                      f"{len(log)} frame(s) logged.")

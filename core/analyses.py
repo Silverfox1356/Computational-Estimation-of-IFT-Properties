@@ -10,9 +10,13 @@ rebuilt log marks it out of date):
     swelling   core.swelling.swelling_check on V(t) from the log; recommends
                Yang (drop static enough) or Bagalkot (it swells)
     bagalkot   core.bagalkot_estimator.estimate_D_bagalkot on V(t): D only
-    yang       Yang et al. 2006 on IFT(t): the drop geometry from the first
-               measured frame -> domain -> mesh -> FEM, the gamma(c)
-               calibration stored in the session, then estimate_D_k_yang
+    yang       Yang et al. 2006 on IFT(t): the drop geometry from one
+               measured frame (the first, or one the user picks) -> domain
+               -> mesh -> FEM, the gamma(c) calibration stored in the
+               session, then estimate_D_k_yang.  IFT(t) comes from the log,
+               or from an IFT-curve CSV stored in the session, so a session
+               of a single image can run it (as the Pendant window's Static
+               mode with Load IFT curve did)
 
 Each ``run_*`` takes ``progress(i, n, text)`` and ``is_cancelled()`` like
 the logger, raises ``AnalysisError`` with a message for the user, and
@@ -125,15 +129,18 @@ def load_session_calibration(folder):
         raise AnalysisError(f"the stored calibration can't be used: {e}") from None
 
 
-def build_model(folder):
-    """Domain, mesh and FEM system from the first measured frame."""
+def build_model(folder, frame_index=None):
+    """Domain, mesh and FEM system from frame ``frame_index`` (default: the
+    first measured frame)."""
     from core.domain_builder import contour_to_domain
     from core.fem_assembly import assemble_fem_system
     from core.mesh_generator import generate_mesh
     from core.pendant_calcs import extract_pendant_edges
-    row, img = folder.first_measured()
+    row, img = folder.first_measured(frame_index)
     if row is None:
-        raise AnalysisError("no stored frame with a successful fit for the drop geometry")
+        raise AnalysisError(
+            "no stored frame with a successful fit for the drop geometry" if frame_index is None
+            else f"frame {frame_index} is not a stored frame with a successful fit")
     s = folder.session
     edges = extract_pendant_edges(img)
     if edges is None:
@@ -152,14 +159,34 @@ def build_model(folder):
                 quality=quality, fem=fem)
 
 
-def run_yang(folder, kD_range=None, D_bounds=None, t_offset=0.0, progress=None,
-             is_cancelled=None):
+def yang_curve(folder, curve):
+    """(t, gamma, n_skipped, curve_sha256) of the IFT curve Yang fits:
+    'log' = the logged frames that passed QC, 'file' = ift_curve.csv."""
+    from core.session import SessionError, sha256_file
+    if curve == 'log':
+        t, g, n_skip = _series(folder, 'ift_mNm', qc_only=True)
+        return t, g, n_skip, None
+    if curve != 'file':
+        raise AnalysisError(f"unknown IFT curve source {curve!r}")
+    try:
+        c = folder.ift_curve()
+    except SessionError as e:
+        raise AnalysisError(str(e)) from None
+    if c is None:
+        raise AnalysisError("the session has no IFT curve file; load one first")
+    return c['t'], c['gamma'], 0, sha256_file(folder.ift_curve_path)
+
+
+def run_yang(folder, kD_range=None, D_bounds=None, t_offset=0.0, curve='log',
+             frame_index=None, progress=None, is_cancelled=None):
     from core.estimator import EstimationCancelled, estimate_D_k_yang
-    _check(folder, 'yang')
-    t, g, n_skip = _series(folder, 'ift_mNm', qc_only=True)
+    ok, why = folder.yang_availability(curve)
+    if not ok:
+        raise AnalysisError(why)
+    t, g, n_skip, curve_sha = yang_curve(folder, curve)
     if len(t) < YANG_MIN_POINTS:
-        raise AnalysisError(f"the fit needs at least {YANG_MIN_POINTS} frames that passed "
-                            f"QC; this session has {len(t)}")
+        raise AnalysisError(f"the fit needs at least {YANG_MIN_POINTS} IFT points; "
+                            f"this curve has {len(t)}")
     if np.any(t + t_offset < 0):
         raise AnalysisError(f"a time offset of {t_offset:g} s puts measurements before the "
                             f"drop formed; use a larger offset")
@@ -168,8 +195,8 @@ def run_yang(folder, kD_range=None, D_bounds=None, t_offset=0.0, progress=None,
             raise AnalysisError(f"the {name} range needs 0 < minimum < maximum")
     calibration = load_session_calibration(folder)
     if progress:
-        progress(0, 0, 'Building the model from the first measured frame')
-    model = build_model(folder)
+        progress(0, 0, 'Building the model (geometry, mesh, FEM) from the drop outline')
+    model = build_model(folder, frame_index)
     if is_cancelled is not None and is_cancelled():
         raise FrameSeriesCancelled()
     sims = [0]
@@ -194,7 +221,9 @@ def run_yang(folder, kD_range=None, D_bounds=None, t_offset=0.0, progress=None,
             'D_near', 'kD_near', 'near_tol', 'near_open', 'D_well_determined', 't_offset')
     q = model['quality']
     data = dict(settings=dict(kD_range=kD_range, D_bounds=D_bounds, t_offset=float(t_offset),
-                              auto=kD_range is None and D_bounds is None),
+                              auto=kD_range is None and D_bounds is None, curve=curve,
+                              curve_sha256=curve_sha,
+                              frame_index=None if frame_index is None else int(frame_index)),
                 result={k: r[k] for k in keys},
                 curve=dict(t=t, gamma_exp=g, gamma_fit=r['gamma_fit']),
                 sweep=r['sweep_kD'],

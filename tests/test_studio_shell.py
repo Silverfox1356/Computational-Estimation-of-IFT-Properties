@@ -76,13 +76,15 @@ def rules(tmp):
     check("single image: logger complete", st['logger'][0] == 'done', st['logger'][1])
     check("single image: swelling not available, with reason",
           st['swelling'][0] == 'off' and 'single image' in st['swelling'][1], st['swelling'][1])
-    check("single image: analyses folder not available", st['analyses'][0] == 'off')
+    check("single image: Yang waits for input (a curve file can feed it)",
+          st['yang'][0] == 'input' and st['analyses'][0] == 'input', st['yang'][1])
+    check("single image: session itself not flagged", st['session'][0] == 'done', st['session'][1])
 
     six = make_folder(tmp / 'six', 10)              # 10 frames: Yang's minimum
     st = nodes.node_statuses(SessionFolder.open(six.path))
     check("series: swelling ready", st['swelling'][0] == 'ready', st['swelling'][1])
     check("series: yang needs calibration",
-          st['yang'][0] == 'off' and 'calibration' in st['yang'][1], st['yang'][1])
+          st['yang'][0] == 'input' and 'calibration' in st['yang'][1], st['yang'][1])
     check("series: calibration optional", st['calibration'][0] == 'ready')
     check("series: session complete", st['session'][0] == 'done', st['session'][0])
     six.save_analysis('swelling', {'settings': {'threshold': 0.03}, 'result': {'message': 'test'}})

@@ -11,6 +11,9 @@ can be opened again without the app remembering how it was made::
       frames/           the logged frames: cropped, grayscale, lossless PNG,
                         named <frame index>_t<seconds>.png
       calibration.csv   copy of the gamma(c) curve, if one is used (Yang)
+      ift_curve.csv     copy of an IFT-vs-time curve from a file, if one is
+                        used for Yang instead of the logged IFT (for example
+                        when only one image of the drop was logged)
       analyses/         settings and results of each analysis (JSON)
 
 Logging writes the folder (:meth:`SessionFolder.create`, then
@@ -63,6 +66,7 @@ SESSION_FILE = 'session.json'
 LOG_FILE = 'log.csv'
 FRAMES_DIR = 'frames'
 CALIBRATION_FILE = 'calibration.csv'
+IFT_CURVE_FILE = 'ift_curve.csv'
 ANALYSES_DIR = 'analyses'
 
 SOURCE_KINDS = ('video', 'camera', 'image')
@@ -354,6 +358,12 @@ class SessionFolder:
     def calibration_path(self):
         return self.path / CALIBRATION_FILE if self.session.calibration else None
 
+    @property
+    def ift_curve_path(self):
+        """The IFT-vs-time curve copied in from a file, or None."""
+        p = self.path / IFT_CURVE_FILE
+        return p if p.is_file() else None
+
     def _scan_frames(self):
         out = {}
         if self.frames_dir.is_dir():
@@ -568,11 +578,18 @@ class SessionFolder:
             img = apply_prep(img, split_prep(self.session.prep_ops)[1])
         return img
 
-    def first_measured(self):
-        """(row, prepared image) of the earliest frame whose fit worked, or
-        (None, None).  Yang uses it as the drop geometry."""
-        for r in sorted(self.log.rows, key=lambda r: r['time_s']):
-            if r['fit_ok'] and r['frame_index'] in self._frames:
+    def measured_frames(self):
+        """Log rows of the stored frames whose fit worked, earliest first.
+        Any of them can give Yang the drop geometry."""
+        return [r for r in sorted(self.log.rows, key=lambda r: (r['time_s'], r['frame_index']))
+                if r['fit_ok'] and r['frame_index'] in self._frames]
+
+    def first_measured(self, frame_index=None):
+        """(row, prepared image) of frame ``frame_index``, or of the earliest
+        frame whose fit worked; (None, None) if there is none.  Yang uses it
+        as the drop geometry."""
+        for r in self.measured_frames():
+            if frame_index is None or r['frame_index'] == frame_index:
                 return r, self.read_frame(r['frame_index'])
         return None, None
 
@@ -651,6 +668,29 @@ class SessionFolder:
         self._write_session()
         self.problems = [p for p in self.problems if p.code != 'calibration_missing']
 
+    def set_ift_curve(self, src_path):
+        """Validate an IFT-vs-time CSV (core.ift_data) and copy it into the
+        folder as the curve Yang can fit instead of the logged IFT.  Returns
+        the parsed curve ({'t', 'gamma', 'warnings'})."""
+        from core.ift_data import IFTDataError, load_ift_curve
+        try:
+            data = load_ift_curve(src_path)
+        except IFTDataError as e:
+            raise SessionError(f"IFT curve not accepted: {e}") from None
+        _atomic_write_bytes(self.path / IFT_CURVE_FILE, Path(src_path).read_bytes())
+        return data
+
+    def ift_curve(self):
+        """The stored IFT curve ({'t', 'gamma', 'warnings'}) or None."""
+        from core.ift_data import IFTDataError, load_ift_curve
+        p = self.ift_curve_path
+        if p is None:
+            return None
+        try:
+            return load_ift_curve(p)
+        except IFTDataError as e:
+            raise SessionError(f"{IFT_CURVE_FILE} can't be read: {e}") from None
+
     def _analysis_path(self, name):
         if not isinstance(name, str) or not _ANALYSIS_NAME.match(name):
             raise SessionError(f"bad analysis name {name!r}")
@@ -677,7 +717,13 @@ class SessionFolder:
 
     def analysis_out_of_date(self, name):
         doc = self.load_analysis(name)
-        return doc is not None and doc.get('log_sha256') != self.session.log_sha256
+        if doc is None:
+            return False
+        settings = (doc.get('data') or {}).get('settings') or {}
+        if settings.get('curve') == 'file':          # Yang on a curve from a file
+            p = self.ift_curve_path
+            return p is None or sha256_file(p) != settings.get('curve_sha256')
+        return doc.get('log_sha256') != self.session.log_sha256
 
     # -- what can run --------------------------------------------------------------
     def availability(self):
@@ -697,16 +743,37 @@ class SessionFolder:
 
         out = {'swelling': series('volume_uL', 'a volume'),
                'bagalkot': series('volume_uL', 'a volume')}
-        ok, why = series('ift_mNm', 'an IFT')
-        if ok:
-            k = sum(1 for r in rows if r['qc_pass'] and math.isfinite(r['ift_mNm'])
-                    and r['ift_mNm'] > 0)
-            if k < YANG_MIN_POINTS:
-                ok, why = False, (f"needs at least {YANG_MIN_POINTS} frames whose IFT "
-                                  f"passed QC; this session has {k}")
-        if ok and self.first_measured()[0] is None:
-            ok, why = False, "no stored frame with a successful fit for the drop geometry"
-        if ok and not (self.calibration_path and self.calibration_path.is_file()):
-            ok, why = False, "needs a gamma(c) calibration curve"
-        out['yang'] = (ok, why)
+        out['yang'] = self.yang_availability()
         return out
+
+    def yang_availability(self, curve=None):
+        """(can_run, reason) for Yang with the IFT curve from ``curve``:
+        'log' (the logged IFT), 'file' (ift_curve.csv) or None (either)."""
+        if not self.measured_frames():
+            return False, "no stored frame with a successful fit for the drop geometry"
+        if not (self.calibration_path and self.calibration_path.is_file()):
+            return False, "needs a gamma(c) calibration curve"
+        why = {}
+        if curve in (None, 'log'):
+            k = (sum(1 for r in self.log.rows if r['qc_pass'] and math.isfinite(r['ift_mNm'])
+                     and r['ift_mNm'] > 0) if self.log.has('ift_mNm') else 0)
+            if k >= YANG_MIN_POINTS:
+                return True, ''
+            what = "a single image" if len(self.log.rows) == 1 else f"{k}"
+            why['log'] = (f"needs at least {YANG_MIN_POINTS} logged frames whose IFT passed "
+                          f"QC; this session has {what}")
+        if curve in (None, 'file'):
+            try:
+                c = self.ift_curve()
+            except SessionError as e:
+                c, why['file'] = None, str(e)
+            if c is not None and len(c['t']) >= YANG_MIN_POINTS:
+                return True, ''
+            if 'file' not in why:
+                why['file'] = ("needs an IFT curve file (CSV)" if c is None else
+                               f"the IFT curve file has {len(c['t'])} points; the fit needs "
+                               f"at least {YANG_MIN_POINTS}")
+        if curve is None:
+            return False, (f"needs an IFT curve: at least {YANG_MIN_POINTS} logged frames "
+                           f"whose IFT passed QC, or an IFT curve file (CSV)")
+        return False, why[curve]
