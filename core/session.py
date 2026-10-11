@@ -334,7 +334,6 @@ class SessionFolder:
         self.session = session
         self.log = log
         self.problems = list(problems)
-        self._warm = None
         self._frames = self._scan_frames()
 
     # -- paths ---------------------------------------------------------------
@@ -428,10 +427,9 @@ class SessionFolder:
 
     def _measure(self, stored_gray, pixel_ops):
         img = apply_prep(cv2.cvtColor(stored_gray, cv2.COLOR_GRAY2BGR), pixel_ops)
-        rec = analyse_frame(img, self.session.analysis_params(), warm_start=self._warm)
-        if rec['fit_ok']:
-            self._warm = dict(beta=rec['results']['beta'], R0_px=rec['results']['R0_px'])
-        return rec
+        # Each frame starts from its own guesses (apex circle, DS/DE): with
+        # the ADSA-P fit that is faster than the previous frame's solution.
+        return analyse_frame(img, self.session.analysis_params())
 
     def log_image(self, img):
         """A single image is a session with one frame at t = 0."""
@@ -590,7 +588,6 @@ class SessionFolder:
                 items.append((float(m.group(2)), i, ''))
         items.sort()
 
-        self._warm = None
         n = len(items)
         for k, (t, i, clock) in enumerate(items):
             if is_cancelled is not None and is_cancelled():
