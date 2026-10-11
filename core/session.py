@@ -67,6 +67,7 @@ ANALYSES_DIR = 'analyses'
 
 SOURCE_KINDS = ('video', 'camera', 'image')
 MIN_SERIES_FRAMES = 5           # same minimum as core.swelling
+YANG_MIN_POINTS = 10            # QC-passed IFT points the Yang fit needs
 MAX_SESSION_BYTES = 1_000_000
 MAX_LOG_BYTES = 100_000_000
 
@@ -671,6 +672,12 @@ class SessionFolder:
         out = {'swelling': series('volume_uL', 'a volume'),
                'bagalkot': series('volume_uL', 'a volume')}
         ok, why = series('ift_mNm', 'an IFT')
+        if ok:
+            k = sum(1 for r in rows if r['qc_pass'] and math.isfinite(r['ift_mNm'])
+                    and r['ift_mNm'] > 0)
+            if k < YANG_MIN_POINTS:
+                ok, why = False, (f"needs at least {YANG_MIN_POINTS} frames whose IFT "
+                                  f"passed QC; this session has {k}")
         if ok and self.first_measured()[0] is None:
             ok, why = False, "no stored frame with a successful fit for the drop geometry"
         if ok and not (self.calibration_path and self.calibration_path.is_file()):

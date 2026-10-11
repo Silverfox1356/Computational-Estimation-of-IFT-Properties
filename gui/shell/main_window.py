@@ -40,6 +40,7 @@ from core.frame_series import FrameSeriesCancelled
 from core.session import SessionError, SessionFolder
 from core.session_draft import DraftError, SessionDraft
 from gui.shell import nodes
+from gui.shell.analysis_pages import AnalysisPages
 from gui.shell.draft_pages import DraftPages
 from gui.shell.graphics import GraphicsArea
 from gui.shell.icons import icon, status_icon
@@ -51,7 +52,7 @@ from gui.window_utils import fit_to_screen
 
 APP_NAME = 'Drop Analysis Studio'
 MAX_RECENT = 8
-STEP4 = 'Built in a later step (running analyses from a session).'
+REPORT_LATER = 'The printable report is the next step of the overhaul.'
 CAMERA_TYPES = ['Basler', 'Webcam']
 VIDEO_FILTER = 'Video files (*.mp4 *.avi *.mkv *.mov *.wmv);;All files (*)'
 IMAGE_FILTER = 'Image files (*.png *.jpg *.jpeg *.bmp *.tif *.tiff);;All files (*)'
@@ -141,6 +142,7 @@ class StudioWindow(QMainWindow):
         self._latest = None
         self._latest_lock = threading.Lock()
         self.draft_pages = DraftPages(self)
+        self.analysis_pages = AnalysisPages(self)
         self.cam_timer = QTimer(self)
         self.cam_timer.timeout.connect(self._camera_tick)
 
@@ -207,11 +209,16 @@ class StudioWindow(QMainWindow):
                         'Go to the first node that needs input')
         self.a_calib = A('calcurve', 'Load\nCalibration', self.load_calibration,
                          'Add a gamma(c) calibration to the session')
-        self.a_swell = A('swell', 'Swelling\nCheck', tip=STEP4, enabled=False)
-        self.a_yang = A('inv', 'Yang\n(D, k)', tip=STEP4, enabled=False)
-        self.a_bagalkot = A('inv', 'Bagalkot\n(D)', tip=STEP4, enabled=False)
+        self.a_swell = A('swell', 'Swelling\nCheck', lambda: self.select_node('swelling'),
+                         'Swelling check on the logged volume')
+        self.a_yang = A('inv', 'Yang\n(D, k)', lambda: self.select_node('yang'),
+                        'Diffusivity and mass-transfer coefficient from IFT(t)')
+        self.a_bagalkot = A('inv', 'Bagalkot\n(D)', lambda: self.select_node('bagalkot'),
+                            'Diffusivity from the drop volume V(t)')
+        self.a_results = A('plot', 'Results', lambda: self.select_node('results'),
+                           'Stored analysis results')
         self.a_export = A('export', 'Export\nLog', self.export_log, 'Save a copy of log.csv')
-        self.a_report = A('report', 'Report', tip=STEP4, enabled=False)
+        self.a_report = A('report', 'Report', tip=REPORT_LATER, enabled=False)
         self.a_reset = A('reset', 'Reset\nDesktop', self.reset_desktop,
                          'Put every panel back in its default place')
 
@@ -234,6 +241,7 @@ class StudioWindow(QMainWindow):
         home.add_group('Prepare', [self.a_crop, self.a_thresh, self.a_scale, self.a_base])
         home.add_group('Logger', [self.a_measure, self.a_start, self.a_stop])
         home.add_group('Frame Log', [self.a_table, self.a_rebuild])
+        home.add_group('Analyses', [self.a_swell, self.a_yang, self.a_bagalkot])
         home.add_group('Guide', [self.a_next])
         src = r.add_page('Source')
         src.add_group('New Session', [self.a_video, self.a_image, self.a_camera])
@@ -246,6 +254,7 @@ class StudioWindow(QMainWindow):
         an.add_group('Inputs', [self.a_calib])
         an.add_group('Run', [self.a_swell, self.a_yang, self.a_bagalkot])
         res = r.add_page('Results')
+        res.add_group('Results', [self.a_results])
         res.add_group('Export', [self.a_export, self.a_report])
         self.setMenuWidget(r)
 
@@ -592,7 +601,8 @@ class StudioWindow(QMainWindow):
         has = self.folder is not None
         busy = self.job_running()
         d = self.draft
-        for a in (self.a_table, self.a_rebuild, self.a_export):
+        for a in (self.a_table, self.a_rebuild, self.a_export, self.a_swell, self.a_yang,
+                  self.a_bagalkot, self.a_results):
             a.setEnabled(has and not busy)
         self.a_calib.setEnabled((has or d is not None) and not busy)
         self.a_close.setEnabled((has or d is not None) and not busy)
@@ -738,12 +748,14 @@ class StudioWindow(QMainWindow):
             return
         self.messages.add(f"Frame log saved to {path}.", 'ok')
 
-    def rebuild_log(self, columns):
+    def rebuild_log(self, columns, prep_ops=None):
+        """Fit the stored frames again (other columns and/or threshold)."""
         folder = self.folder
 
         def task(progress, is_cancelled):
             return folder.rebuild_log(
-                columns, progress_cb=lambda i, n, rec: progress(i, n, f"Frame {i} of {n}"),
+                columns, prep_ops=prep_ops,
+                progress_cb=lambda i, n, rec: progress(i, n, f"Frame {i} of {n}"),
                 is_cancelled=is_cancelled)
 
         def done(log):
@@ -752,6 +764,35 @@ class StudioWindow(QMainWindow):
             self.reload_views()
 
         self.run_job('Rebuilding the frame log', task, done)
+
+    def run_analysis(self, name, **settings):
+        """Run a stored analysis (core.analyses) on the open session."""
+        from core.analyses import LABELS, RUNNERS
+        folder = self.folder
+        if folder is None:
+            return
+
+        def task(progress, is_cancelled):
+            return RUNNERS[name](folder, progress=progress, is_cancelled=is_cancelled, **settings)
+
+        def done(data):
+            r = data['result']
+            if name == 'swelling':
+                summary = r.get('message', '')
+            elif name == 'bagalkot':
+                summary = f"D = {fmt(r['D'], 4)} m2/s (SF {fmt(r['SF'], 3)})"
+            else:
+                summary = (f"D = {fmt(r['D'], 4)} m2/s, k = {fmt(r['k'], 4)} m/s, "
+                           f"E = {fmt(r['E_percent'], 3)} %")
+            self.messages.add(f"{LABELS[name]}: {summary}", 'ok')
+            self.graphics.show_results(folder)
+            self.graphics.show_result(name)
+
+        def finally_():
+            if self.folder is folder:
+                self.select_node(name)
+
+        self.run_job(f"Running the {LABELS[name].lower()}", task, done, on_finally=finally_)
 
     def measure_reference(self):
         d = self.draft

@@ -109,7 +109,7 @@ def run(tmp):
     print("── log a few frames ──")
     p1 = tmp / 'drops'
     folder = SessionFolder.create(p1, make_session(analyses=['swelling']))
-    R0s = [60, 64, 68, 72, 76, 80]
+    R0s = [60, 62, 64, 66, 68, 70, 72, 74, 76, 78]     # 10: Yang's minimum
     recs = log_drops(folder, R0s)
     frames = sorted((p1 / FRAMES_DIR).glob('*.png'))
     check("one PNG per frame", len(frames) == len(R0s), f"{len(frames)} files")

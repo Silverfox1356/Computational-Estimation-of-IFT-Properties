@@ -149,9 +149,11 @@ def node_statuses(folder):
         if not ok:
             st[key] = ('off', why)
         elif folder.load_analysis(key) is not None:
-            st[key] = (('stale', 'The log changed since this analysis ran; run it again.')
-                       if folder.analysis_out_of_date(key)
-                       else ('done', 'Results stored in the session.'))
+            if folder.analysis_out_of_date(key):
+                st[key] = ('stale', 'The log changed since this analysis ran; run it again.')
+            else:
+                caveat = result_caveat(key, folder.load_analysis(key))
+                st[key] = ('warn', caveat) if caveat else ('done', 'Results stored in the session.')
         else:
             st[key] = ('ready', 'Ready to run.')
     st['yang_model'] = (('off', 'Available once Diffusivity (Yang) can run.')
@@ -162,13 +164,37 @@ def node_statuses(folder):
     else:
         st['analyses'] = _worst(st, 'analyses')
 
-    st['report'] = ('off', 'Run an analysis first.')
-    st['results'] = ('off', 'Run an analysis first.')
+    stored = [k for k in ('swelling', 'bagalkot', 'yang') if st[k][0] in ('done', 'stale', 'warn')]
+    if stored:
+        stale = [k for k in stored if st[k][0] == 'stale']
+        st['results'] = (('stale', 'Some results are out of date.') if stale
+                         else ('done', f"{len(stored)} analysis result(s) stored."))
+        if 'yang' in stored:
+            st['yang_model'] = ('done', 'Built when Diffusivity (Yang) ran.')
+    else:
+        st['results'] = ('off', 'Run an analysis first.')
+    st['report'] = ('off', 'The printable report is the next step of the overhaul.')
     worst = _worst(st, None, keys=[k for k in st])
     st['session'] = (worst[0] if worst[0] in ('warn', 'input') else 'done',
                      worst[1] if worst[0] in ('warn', 'input') else
                      f"{len(log)} frame(s) logged.")
     return st
+
+
+def result_caveat(key, doc):
+    """Why a stored result should not be trusted as it stands, or ''."""
+    try:
+        r = doc['data']['result']
+    except (KeyError, TypeError):
+        return 'The stored result cannot be read.'
+    if key == 'yang':
+        if not r.get('success', True):
+            return 'The fit did not converge: ' + (r.get('message') or 'see the page.')
+        if not r.get('D_well_determined', True):
+            return 'D is not well determined by this curve (see the page).'
+    if key == 'bagalkot' and r.get('at_edge'):
+        return 'The best D is at the edge of the search range; widen it.'
+    return ''
 
 
 _ORDER = ('warn', 'input', 'stale', 'ready', 'done', 'off')

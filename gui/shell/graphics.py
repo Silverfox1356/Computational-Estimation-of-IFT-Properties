@@ -12,8 +12,8 @@ The Graphics area: one tab widget whose tabs appear when their data exists.
                baseline row) and the fitted outline
     Log Plot   any logged column against time, QC pass / fail coloured;
                clicking a point shows that frame
-
-Later steps add Mesh, Concentration and Fit Diagnostics tabs the same way.
+    Swelling, Bagalkot Fit, Yang Fit, Mesh
+               the stored result of each analysis that has run
 """
 
 import math
@@ -34,6 +34,7 @@ from core import frame_log as fl
 from core.session import SessionError
 from gui.shell.icons import icon
 from gui.shell.panels import fmt
+from gui.shell.result_views import BagalkotView, MeshView, SwellingView, YangView
 from gui.shell.theme import PLOT_FAIL, PLOT_LINE, PLOT_PASS
 from gui.styles import make_cosmetic_pen as _cosmetic_pen
 
@@ -609,6 +610,8 @@ class GraphicsArea(QTabWidget):
         self.start = StartPage()
         self.frames = FrameViewer()
         self.logplot = LogPlot()
+        self.results = dict(swelling=SwellingView(), bagalkot=BagalkotView(),
+                            yang=YangView(), mesh=MeshView())
         self.show_session(None)
 
     def show_session(self, folder):
@@ -620,6 +623,39 @@ class GraphicsArea(QTabWidget):
         self.logplot.set_log(folder.log)
         self.addTab(self.frames, icon('image'), 'Frame')
         self._maybe_add_plot(folder)
+        self.show_results(folder)
+
+    RESULT_TABS = (('swelling', 'swelling', 'swell', 'Swelling'),
+                   ('bagalkot', 'bagalkot', 'inv', 'Bagalkot Fit'),
+                   ('yang', 'yang', 'inv', 'Yang Fit'),
+                   ('mesh', 'yang', 'mesh', 'Mesh'))
+
+    def show_results(self, folder):
+        """One tab per stored analysis result (added, refreshed or removed)."""
+        docs = {}
+        for name in ('swelling', 'bagalkot', 'yang'):
+            try:
+                docs[name] = folder.load_analysis(name) if folder else None
+            except SessionError:
+                docs[name] = None
+        for view_key, doc_key, ic, title in self.RESULT_TABS:
+            view, doc = self.results[view_key], docs[doc_key]
+            i = self.indexOf(view)
+            if doc is None:
+                if i >= 0:
+                    self.removeTab(i)
+                continue
+            try:
+                view.set_data(doc['data'])
+            except (KeyError, TypeError, ValueError):
+                continue                        # an old or hand-edited result: skip the tab
+            if i < 0:
+                self.addTab(view, icon(ic), title)
+
+    def show_result(self, name):
+        view = self.results.get(name)
+        if view is not None and self.indexOf(view) >= 0:
+            self.setCurrentWidget(view)
 
     def show_draft(self, draft):
         self.clear()

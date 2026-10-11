@@ -27,6 +27,7 @@ from gui.shell.panels import fmt
 
 LATER_LOGGING = ('Fixed for this session: to change it, start a new session from the same '
                  'source (File > New session) and log again.')
+ANALYSIS_KEYS = ('swelling', 'bagalkot', 'yang', 'yang_model', 'results', 'threshold')
 LATER_ANALYSIS = ('Running analyses from a session is built in a later step; until then '
                   'use the Pendant Drop window.')
 
@@ -188,6 +189,8 @@ class SettingsPanel(QScrollArea):
         build = getattr(self, f'_page_{key}', None)
         if draft is not None:
             self.window.draft_pages.build(key, lay)
+        elif folder is not None and key in ANALYSIS_KEYS:
+            self.window.analysis_pages.build(key, folder, lay)
         elif folder is None and key != 'session':
             lay.addWidget(note('Open a session folder to see this.'))
         elif build is not None:
@@ -242,12 +245,9 @@ class SettingsPanel(QScrollArea):
     def _page_analyses(self, folder, lay):
         self._children_page('analyses', lay)
 
-    def _page_results(self, folder, lay):
-        lay.addWidget(note('Plots and the report of each analysis will be listed here.'))
-
     def _page_report(self, folder, lay):
-        lay.addWidget(note('A report of the session and its analyses (settings, results, '
-                           'plots) is built in a later step.'))
+        lay.addWidget(note('A printable report of the session and its analyses (settings, '
+                           'results, plots) is the next step of the overhaul.'))
 
     def _page_fluids(self, folder, lay):
         s = folder.session
@@ -321,14 +321,6 @@ class SettingsPanel(QScrollArea):
             sec.widget(note('No crop: frames are stored whole.'))
         lay.addWidget(sec)
         lay.addWidget(note('Stored frames are already cropped. ' + LATER_LOGGING))
-
-    def _page_threshold(self, folder, lay):
-        thr = [a for op, a in folder.session.prep_ops if op == 'threshold']
-        sec = Section('Threshold')
-        sec.field('Level', thr[-1] if thr else 'automatic (Otsu)')
-        lay.addWidget(sec)
-        lay.addWidget(note('Frames are stored before the threshold; a control to change it '
-                           'and rebuild the log comes with the analyses step.'))
 
     def _page_logger(self, folder, lay):
         s = folder.session
@@ -405,35 +397,3 @@ class SettingsPanel(QScrollArea):
         self.window.rebuild_log(fl.column_keys(
             chosen, analyses=self.window.folder.session.analyses,
             camera=self.window.folder.session.source.get('kind') == 'camera'))
-
-    def _analysis_page(self, key, needs, lay):
-        folder = self.window.folder
-        sec = Section('Requirements')
-        sec.field('Reads', needs)
-        ok, why = folder.availability()[key]
-        sec.field('Can run', 'Yes' if ok else f"No: {why}")
-        lay.addWidget(sec)
-        doc = folder.load_analysis(key)
-        if doc is not None:
-            sec = Section('Stored result')
-            sec.field('Saved', doc.get('saved', '-'))
-            lay.addWidget(sec)
-        b = QPushButton(icon('compute'), 'Run')
-        b.setEnabled(False)
-        b.setToolTip(LATER_ANALYSIS)
-        lay.addWidget(b, 0, Qt.AlignmentFlag.AlignLeft)
-        lay.addWidget(note(LATER_ANALYSIS))
-
-    def _page_swelling(self, folder, lay):
-        self._analysis_page('swelling', 'Volume against time from the log', lay)
-
-    def _page_bagalkot(self, folder, lay):
-        self._analysis_page('bagalkot', 'Volume against time from the log', lay)
-
-    def _page_yang(self, folder, lay):
-        self._analysis_page('yang', 'IFT against time from the log, the first measured '
-                            'frame (drop geometry) and the gamma(c) calibration', lay)
-
-    def _page_yang_model(self, folder, lay):
-        lay.addWidget(note('The diffusion model (geometry, mesh, FEM system) is built '
-                           'from the first measured frame when Diffusivity (Yang) runs.'))

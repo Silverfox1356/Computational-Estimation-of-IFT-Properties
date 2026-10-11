@@ -78,14 +78,14 @@ def rules(tmp):
           st['swelling'][0] == 'off' and 'single image' in st['swelling'][1], st['swelling'][1])
     check("single image: analyses folder not available", st['analyses'][0] == 'off')
 
-    six = make_folder(tmp / 'six', 6)
+    six = make_folder(tmp / 'six', 10)              # 10 frames: Yang's minimum
     st = nodes.node_statuses(SessionFolder.open(six.path))
     check("series: swelling ready", st['swelling'][0] == 'ready', st['swelling'][1])
     check("series: yang needs calibration",
           st['yang'][0] == 'off' and 'calibration' in st['yang'][1], st['yang'][1])
     check("series: calibration optional", st['calibration'][0] == 'ready')
     check("series: session complete", st['session'][0] == 'done', st['session'][0])
-    six.save_analysis('swelling', {'S': 0.1})
+    six.save_analysis('swelling', {'settings': {'threshold': 0.03}, 'result': {'message': 'test'}})
     st = nodes.node_statuses(SessionFolder.open(six.path))
     check("stored analysis complete", st['swelling'][0] == 'done')
 
