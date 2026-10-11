@@ -180,7 +180,7 @@ def window(tmp):
           and len(warnings) == n_warn + 1)
     check("previous session still open", w.folder is not None)
 
-    w.close_session()
+    w.close_current()
     app.processEvents()
     check("closing returns to Start", w.folder is None and w.graphics.tabText(0) == 'Start')
     w.close()

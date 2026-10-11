@@ -67,6 +67,8 @@ QFrame#Callout { background: #fff8e6; border: 1px solid #e0b252; border-radius: 
 QFrame#CalloutGood { background: #f0faf2; border: 1px solid #9fd0a9; border-radius: 3px; }
 QFrame#CalloutInfo { background: #eef5fc; border: 1px solid #a9c9ec; border-radius: 3px; }
 QLabel#Note { color: #5c6470; }
+QLabel#PickHint { background: #fff4c2; border-bottom: 1px solid #e0c060; padding: 5px 10px;
+    color: #5a4500; font-weight: 600; }
 
 /* buttons */
 QPushButton { background: qlineargradient(x1:0,y1:0,x2:0,y2:1, stop:0 #ffffff, stop:1 #eceff2);

@@ -46,6 +46,45 @@ def children(key):
     return [n for n in NODES if n.parent == key]
 
 
+def draft_statuses(draft):
+    """{node key: (status, reason)} for a session being set up
+    (core.session_draft.SessionDraft); nothing is on disk yet."""
+    missing = dict(draft.missing())
+    off = 'Available once the frames are logged.'
+    st = {n.key: ('off', off) for n in NODES}
+    f, n = draft.fluids, draft.needle
+    st['fluids'] = ('done', f"{f.get('name') or 'Fluids'}: inner {f['density_inner']:g}, "
+                    f"outer {f['density_outer']:g} kg/m3; needle {n['od_mm']:g} mm")
+    st['calibration'] = (('done', 'Will be copied into the session.') if draft.calibration_path
+                         else ('ready', 'Optional: only Diffusivity (Yang) needs it.'))
+    st['global'] = _worst(st, 'global')
+    st['source'] = ('done', f"{draft.kind.capitalize()}: {draft.source.get('name', '')}")
+    box = draft.crop_box()
+    st['crop'] = ('done', f"Cropped to {box[2]} x {box[3]} px" if box
+                  else 'No crop: the whole frame is used.')
+    thr = draft.threshold()
+    st['threshold'] = ('done', f"Threshold level {thr}" if thr is not None
+                       else 'Automatic (Otsu) per frame.')
+    for key in ('scale', 'baseline'):
+        st[key] = ('input', missing[key]) if key in missing else ('done', '')
+    if 'scale' not in missing:
+        st['scale'] = ('done', f"{draft.scale['pixel_to_m'] * 1e6:.4g} um/px "
+                       f"({draft.scale.get('method')})")
+    if 'baseline' not in missing:
+        st['baseline'] = ('done', f"y = {draft.baseline['y_px']:g} px "
+                          f"({draft.baseline.get('method')})")
+    if 'logger' in missing:
+        st['logger'] = ('input', missing['logger'])
+    elif missing:
+        st['logger'] = ('input', 'Complete the steps above, then start logging.')
+    else:
+        st['logger'] = ('ready', 'Ready to start logging.')
+    st['log'] = ('off', 'Nothing logged yet.')
+    st['session'] = (('input', f"New session, not saved yet: {len(missing)} item(s) needed.")
+                     if missing else ('ready', 'New session, ready to log.'))
+    return st
+
+
 def node_statuses(folder):
     """{node key: (status, reason)} for an open SessionFolder, or for no
     session when ``folder`` is None."""

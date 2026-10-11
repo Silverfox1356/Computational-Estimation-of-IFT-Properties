@@ -25,9 +25,37 @@ from gui.shell.icons import icon, status_icon
 from gui.shell.nodes import NODE, STATUS_LABELS, children
 from gui.shell.panels import fmt
 
-LATER_LOGGING = 'Changing this means logging the frames again; that is built in the next step.'
+LATER_LOGGING = ('Fixed for this session: to change it, start a new session from the same '
+                 'source (File > New session) and log again.')
 LATER_ANALYSIS = ('Running analyses from a session is built in a later step; until then '
                   'use the Pendant Drop window.')
+
+
+PLANS = {'dense_early': 'Dense early, then sparser', 'interval': 'One frame every N seconds'}
+
+
+def sampling_rows(kind, sampling):
+    """(label, value, unit) rows describing how frames were sampled."""
+    s = sampling or {}
+    if kind == 'image':
+        return [('Plan', 'Single image, logged as one frame at t = 0', '')]
+    if kind == 'camera':
+        dur = s.get('duration_s')
+        return [('Interval', fmt(s.get('interval_s')), 's'),
+                ('Stop after', f"{fmt(dur / 60.0)} min" if dur else 'stopped by hand', '')]
+    rows = [('Plan', PLANS.get(s.get('mode'), s.get('mode') or '-'), '')]
+    if s.get('mode') == 'interval':
+        rows.append(('Interval', fmt(s.get('interval_s')), 's'))
+    else:
+        rows.append(('Frames requested', s.get('n_frames', '-'), ''))
+        rows.append(('First step', fmt(s['first_step_s']) if s.get('first_step_s') else 'automatic',
+                     's' if s.get('first_step_s') else ''))
+    rows.append(('Drop formed at', fmt(s.get('t_start_s', 0.0)), 's'))
+    rows.append(('Logged until', fmt(s['t_end_s']) if s.get('t_end_s') is not None
+                 else 'end of the video', 's' if s.get('t_end_s') is not None else ''))
+    if s.get('planned_frames'):
+        rows.append(('Frames planned', s['planned_frames'], ''))
+    return rows
 
 
 def _crumb(key):
@@ -131,8 +159,14 @@ class SettingsPanel(QScrollArea):
         lay.setContentsMargins(10, 8, 10, 10)
         lay.setSpacing(4)
         key = self.key
-        title = QLabel(NODE[key].label if key != 'session' or self.window.folder is None
-                       else self.window.folder.path.name)
+        draft = getattr(self.window, 'draft', None)
+        if key == 'session' and draft is not None:
+            name = 'New session'
+        elif key == 'session' and self.window.folder is not None:
+            name = self.window.folder.path.name
+        else:
+            name = NODE[key].label
+        title = QLabel(name)
         title.setObjectName('PageTitle')
         title.setWordWrap(True)
         lay.addWidget(title)
@@ -152,7 +186,9 @@ class SettingsPanel(QScrollArea):
         lay.addLayout(srow)
         folder = self.window.folder
         build = getattr(self, f'_page_{key}', None)
-        if folder is None and key != 'session':
+        if draft is not None:
+            self.window.draft_pages.build(key, lay)
+        elif folder is None and key != 'session':
             lay.addWidget(note('Open a session folder to see this.'))
         elif build is not None:
             build(folder, lay)
@@ -162,6 +198,14 @@ class SettingsPanel(QScrollArea):
     # -- pages ------------------------------------------------------------------
     def _page_session(self, folder, lay):
         if folder is None:
+            sec = Section('New session')
+            for kind, ic, text in (('video', 'video', 'From a video...'),
+                                   ('image', 'image', 'From an image...'),
+                                   ('camera', 'camera', 'From the camera...')):
+                b = QPushButton(icon(ic), text)
+                b.clicked.connect(lambda _=False, k=kind: self.window.new_session(k))
+                sec.widget(b)
+            lay.addWidget(sec)
             b = QPushButton(icon('open'), 'Open session folder...')
             b.setObjectName('Primary')
             b.clicked.connect(self.window.open_session_dialog)
@@ -283,24 +327,21 @@ class SettingsPanel(QScrollArea):
         sec = Section('Threshold')
         sec.field('Level', thr[-1] if thr else 'automatic (Otsu)')
         lay.addWidget(sec)
-        lay.addWidget(note('Frames are stored before the threshold, so it can be '
-                           'changed and the log rebuilt (step 3 adds the control).'))
+        lay.addWidget(note('Frames are stored before the threshold; a control to change it '
+                           'and rebuild the log comes with the analyses step.'))
 
     def _page_logger(self, folder, lay):
         s = folder.session
+        if self.window.logging:
+            lay.addWidget(callout('Logging is running; press Stop to end it. Frames logged '
+                                  'so far are kept.', 'info'))
         sec = Section('Sampling')
-        if s.sampling:
-            for k, v in s.sampling.items():
-                sec.field(k.replace('_', ' ').capitalize(), v)
-        else:
-            sec.widget(note('No sampling plan recorded (single image or camera).'))
+        for label, value, unit in sampling_rows(s.source.get('kind'), s.sampling):
+            sec.field(label, value, unit)
         sec.field('Frames logged', len(folder.log))
         lay.addWidget(sec)
-        b = QPushButton(icon('compute'), 'Start logging')
-        b.setEnabled(False)
-        b.setToolTip(LATER_LOGGING)
-        lay.addWidget(b, 0, Qt.AlignmentFlag.AlignLeft)
-        lay.addWidget(note('Logging a new video, image or camera feed is built in the next step.'))
+        lay.addWidget(note('To log more frames or change the sampling, start a new '
+                           'session from the same source (File > New session).'))
 
     def _page_scale(self, folder, lay):
         sc = folder.session.scale

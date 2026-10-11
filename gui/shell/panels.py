@@ -63,8 +63,11 @@ class ProgressPanel(QWidget):
         self.btn_cancel.setEnabled(True)
 
     def update_progress(self, i, n, text=''):
-        self.bar.setRange(0, max(n, 1))
-        self.bar.setValue(i)
+        if n <= 0:                       # open-ended (camera until stopped)
+            self.bar.setRange(0, 0)
+        else:
+            self.bar.setRange(0, n)
+            self.bar.setValue(min(i, n))
         if text:
             self.label.setText(text)
 
@@ -87,6 +90,7 @@ class Job(QThread):
     def __init__(self, title, fn, parent=None):
         super().__init__(parent)
         self.title = title
+        self.on_finally = None
         self._fn = fn
         self._cancel = False
 
