@@ -10,16 +10,16 @@ start a pick on the Frame tab.
 """
 
 from PyQt6.QtCore import Qt
-from PyQt6.QtWidgets import (QButtonGroup, QComboBox, QDoubleSpinBox, QHBoxLayout,
-                             QLabel, QLineEdit, QListWidget, QListWidgetItem,
-                             QPushButton, QRadioButton, QSlider, QSpinBox, QWidget)
+from PyQt6.QtWidgets import (QButtonGroup, QComboBox, QDoubleSpinBox, QLabel, QLineEdit,
+                             QListWidget, QListWidgetItem, QPushButton, QRadioButton,
+                             QSizePolicy, QSlider, QSpinBox)
 
 from core import frame_log as fl
 from core import presets as P
 from core.session_draft import SECONDS_PER_FRAME, DraftError
 from gui.shell.icons import icon
 from gui.shell.nodes import children
-from gui.shell.pages import Section, callout, note
+from gui.shell.pages import Section, callout, flow_row, ift_result_section, note
 from gui.shell.panels import fmt
 
 
@@ -36,15 +36,8 @@ def _spin(value, lo, hi, decimals=3, step=None, suffix=''):
 
 
 def _row(*widgets, stretch=True):
-    w = QWidget()
-    h = QHBoxLayout(w)
-    h.setContentsMargins(0, 0, 0, 0)
-    h.setSpacing(6)
-    for x in widgets:
-        h.addWidget(x)
-    if stretch:
-        h.addStretch(1)
-    return w
+    """Widgets side by side, wrapping onto a new line when the panel is narrow."""
+    return flow_row(*widgets)
 
 
 def _button(text, ic, slot, primary=False, tip=''):
@@ -53,7 +46,7 @@ def _button(text, ic, slot, primary=False, tip=''):
         b.setObjectName('Primary')
     if tip:
         b.setToolTip(tip)
-    b.clicked.connect(slot)
+    b.clicked.connect(lambda: slot())        # not slot(checked): see StudioWindow._act
     return b
 
 
@@ -104,6 +97,8 @@ class DraftPages:
             for key, msg in missing:
                 b = QPushButton(icon('next'), msg)
                 b.setStyleSheet('text-align:left; padding-left:8px;')
+                b.setToolTip(msg)
+                b.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Fixed)
                 b.clicked.connect(lambda _=False, k=key: self.w.select_node(k))
                 sec.widget(b)
         else:
@@ -222,6 +217,23 @@ class DraftPages:
                 lambda: setattr(d, 'calibration_path', None), rebuild=True)))
         lay.addWidget(_row(*row))
 
+    # -- single-frame IFT ----------------------------------------------------------------
+    def page_frame_ift(self, d, lay):
+        sec = Section('Reference frame')
+        sec.widget(note('Measures the interfacial tension of the reference frame with the '
+                        'set-up above, as the old Static mode did. Nothing is saved; after '
+                        'logging, any logged frame can be measured here.'))
+        lay.addWidget(sec)
+        ready = d.scale is not None and d.baseline is not None
+        b = _button('Measure IFT', 'drop', self.w.measure_reference, primary=True,
+                    tip='Fit the drop shape of the reference frame')
+        b.setEnabled(ready and not self.w.job_running())
+        lay.addWidget(_row(b))
+        if not ready:
+            lay.addWidget(note('Set the scale and the baseline first.'))
+        if d.preview:
+            lay.addWidget(ift_result_section(d.preview, 'Result: reference frame'))
+
     # -- source and preparation ---------------------------------------------------------
     def page_source(self, d, lay):
         s = d.source
@@ -275,7 +287,8 @@ class DraftPages:
     def page_threshold(self, d, lay):
         sec = Section('Threshold')
         level = d.threshold()
-        auto = QRadioButton('Automatic (Otsu) on every frame')
+        auto = QRadioButton('Automatic (Otsu)')
+        auto.setToolTip("Otsu's threshold, computed again on every frame")
         fixed = QRadioButton('Fixed level')
         grp = QButtonGroup(sec)
         grp.addButton(auto)

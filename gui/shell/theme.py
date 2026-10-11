@@ -5,7 +5,20 @@ gui.shell.theme
 Light theme for Drop Analysis Studio, in the style of engineering
 simulation software (light panels, blue accents).  Applied to the studio
 window only, so the older dark windows keep their own look.
+
+:class:`StudioLook` covers what a window stylesheet alone does not: the
+Studio's dialogs and popups get the light palette (with Windows in dark mode
+they would otherwise be dark behind the stylesheet's dark text), its spin
+boxes and dropdowns sit on Qt's own Fusion style rather than the Windows 11
+one, and dropdown lists use a delegate that follows the hover rule.  The
+spin-box arrow buttons are drawn by the stylesheet, so they click where
+they are drawn.
 """
+from pathlib import Path
+
+from PyQt6.QtCore import QEvent, QObject, Qt
+from PyQt6.QtWidgets import (QAbstractSpinBox, QApplication, QComboBox, QStyle, QStyleFactory,
+                             QStyledItemDelegate, QWidget)
 
 ACCENT = '#2b6cb0'
 TEXT = '#1f2328'
@@ -41,11 +54,21 @@ QFrame#RibbonGroup QToolButton:hover { background: #e5f1fb; border-color: #a9d1f
 QFrame#RibbonGroup QToolButton:pressed { background: #cce4f7; }
 QFrame#RibbonGroup QToolButton:disabled { color: #a0a4aa; }
 
-/* docks */
-QDockWidget { font-weight: 600; color: #26364a; }
-QDockWidget::title { background: qlineargradient(x1:0,y1:0,x2:0,y2:1, stop:0 #f7f9fc, stop:1 #e7ecf2);
-    border: 1px solid #c9d2dd; padding: 4px 8px; text-align: left; }
-QDockWidget > QWidget { background: #ffffff; border: 1px solid #c3c7cc; border-top: none; }
+/* side panels and the activity bar */
+QWidget#ActivityBar { background: #e9ecf0; border-right: 1px solid #c9d2dd; }
+QWidget#ActivityBar QToolButton { border: none; border-left: 3px solid transparent; padding: 7px 6px;
+    background: transparent; }
+QWidget#ActivityBar QToolButton:hover { background: #dbe3ec; }
+QWidget#ActivityBar QToolButton:checked { border-left-color: #2b6cb0; background: #ffffff; }
+QWidget#PanelHeader { background: qlineargradient(x1:0,y1:0,x2:0,y2:1, stop:0 #f7f9fc, stop:1 #e7ecf2);
+    border: 1px solid #c9d2dd; }
+QLabel#PanelTitle { font-weight: 600; color: #26364a; padding: 4px 8px; background: transparent; }
+QToolButton#PanelHide { border: none; background: transparent; padding: 0 6px; font-weight: 600;
+    color: #4a5868; }
+QToolButton#PanelHide:hover { background: #d3dde8; }
+QWidget#Panel { background: #ffffff; }
+QSplitter::handle { background: #d5d9de; }
+QSplitter::handle:hover { background: #8fb8e0; }
 
 /* tree */
 QTreeWidget { background: #ffffff; border: none; outline: 0; }
@@ -98,12 +121,46 @@ QHeaderView::section { background: #eef1f5; border: 1px solid #d6dce4; padding: 
 /* inputs */
 QLineEdit, QComboBox, QSpinBox, QDoubleSpinBox { background: #ffffff; border: 1px solid #b9c2cc;
     padding: 2px 5px; min-height: 18px; }
+QComboBox QAbstractItemView { background: #ffffff; color: #1f2328; border: 1px solid #b9c2cc;
+    outline: 0; selection-background-color: #cce4f7; selection-color: #1f2328; }
+QComboBox QAbstractItemView::item { min-height: 22px; padding: 0 6px; }
+QComboBox QAbstractItemView::item:hover { background: #e5f1fb; color: #1f2328; }
+QComboBox QAbstractItemView::item:selected { background: #cce4f7; color: #1f2328; }
+
+/* popups and dialogs: light whatever the Windows colour mode */
+QMenu { background: #ffffff; border: 1px solid #b9c2cc; padding: 3px 0; }
+QMenu::item { padding: 5px 22px 5px 28px; background: transparent; color: #1f2328; }
+QMenu::item:selected { background: #e5f1fb; }
+QMenu::item:disabled { color: #a0a4aa; }
+QMenu::icon { padding-left: 6px; }
+QMenu::separator { height: 1px; background: #e0e3e7; margin: 3px 8px; }
+QDialog, QMessageBox, QInputDialog, QFileDialog { background: #f3f4f6; }
+QToolTip { background: #ffffdc; color: #1f2328; border: 1px solid #b9b9a0; padding: 2px; }
 QListWidget { border: 1px solid #d3d8de; background: #ffffff; }
 
 /* status bar */
 QStatusBar { background: #f3f3f3; border-top: 1px solid #cfcfcf; }
 QStatusBar QLabel { padding: 0 8px; color: #333; }
 QStatusBar::item { border: none; border-right: 1px solid #d6d6d6; }
+"""
+
+# Spin-box arrow buttons drawn by the stylesheet itself, so where they are
+# drawn and where they click are the same rectangle under any Qt style.
+_ASSETS = (Path(__file__).resolve().parent.parent / 'assets').as_posix()
+STYLESHEET += f"""
+QAbstractSpinBox {{ padding-right: 20px; }}
+QAbstractSpinBox::up-button, QAbstractSpinBox::down-button {{ subcontrol-origin: border;
+    width: 18px; background: #f3f5f8; border-left: 1px solid #c9d0d8; }}
+QAbstractSpinBox::up-button {{ subcontrol-position: top right; border-bottom: 1px solid #dde2e8; }}
+QAbstractSpinBox::down-button {{ subcontrol-position: bottom right; }}
+QAbstractSpinBox::up-button:hover, QAbstractSpinBox::down-button:hover {{ background: #e5f1fb; }}
+QAbstractSpinBox::up-button:pressed, QAbstractSpinBox::down-button:pressed {{ background: #cce4f7; }}
+QAbstractSpinBox::up-arrow {{ image: url({_ASSETS}/spin_up.svg); width: 9px; height: 6px; }}
+QAbstractSpinBox::down-arrow {{ image: url({_ASSETS}/spin_down.svg); width: 9px; height: 6px; }}
+QAbstractSpinBox::up-arrow:disabled, QAbstractSpinBox::up-arrow:off {{
+    image: url({_ASSETS}/spin_up_off.svg); }}
+QAbstractSpinBox::down-arrow:disabled, QAbstractSpinBox::down-arrow:off {{
+    image: url({_ASSETS}/spin_down_off.svg); }}
 """
 
 
@@ -122,3 +179,73 @@ def light_palette():
     for role in (R.WindowText, R.Text, R.ButtonText):
         pal.setColor(QPalette.ColorGroup.Disabled, role, QColor('#a0a4aa'))
     return pal
+
+
+def fusion_style():
+    """One Fusion style for every Studio window, owned by the application:
+    a widget does not own its style, and the style must outlive every
+    widget that uses it."""
+    app = QApplication.instance()
+    style = app.findChild(QStyle, 'StudioFusion')
+    if style is None:
+        style = QStyleFactory.create('Fusion')
+        style.setObjectName('StudioFusion')
+        style.setParent(app)
+    return style
+
+
+class StudioLook(QObject):
+    """Application event filter, scoped to one Studio window and what it
+    opens: dialogs and popups get the light palette, spin boxes and
+    dropdowns Qt's Fusion style (the Windows 11 style lays their arrows out
+    differently from the stylesheet, so a click can miss the arrow it is
+    on), and dropdowns may shrink below their longest entry."""
+
+    def __init__(self, root):
+        super().__init__(root)
+        self.root = root
+        self.palette = light_palette()
+        self.fusion = fusion_style()
+        self._on = False
+
+    def attach(self):
+        """Watch the application's widgets.  Only while the window is open:
+        a Python filter called for widgets being destroyed can crash."""
+        app = QApplication.instance()
+        if not self._on and app is not None:
+            app.installEventFilter(self)
+            app.aboutToQuit.connect(self.detach)
+            self._on = True
+
+    def detach(self):
+        app = QApplication.instance()
+        if self._on and app is not None:
+            app.removeEventFilter(self)
+            app.aboutToQuit.disconnect(self.detach)
+            self._on = False
+
+    def ours(self, w):
+        while w is not None:
+            if w is self.root:
+                return True
+            w = w.parentWidget()
+        return False
+
+    def eventFilter(self, obj, ev):
+        if ev.type() == QEvent.Type.Polish and isinstance(obj, QWidget) and self.ours(obj):
+            if (isinstance(obj, (QAbstractSpinBox, QComboBox))
+                    and not obj.testAttribute(Qt.WidgetAttribute.WA_SetStyle)):
+                obj.setStyle(self.fusion)
+                if isinstance(obj, QComboBox):
+                    obj.setSizeAdjustPolicy(
+                        QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
+                    obj.setMinimumContentsLength(8)
+                    # The default delegate ignores the stylesheet's item rules
+                    # (no hover highlight); a styled one follows them.
+                    obj.setItemDelegate(QStyledItemDelegate(obj))
+                    obj.view().setMouseTracking(True)
+                    obj.view().viewport().setAttribute(Qt.WidgetAttribute.WA_Hover, True)
+            if obj.isWindow() and obj is not self.root and not obj.property('studio_light'):
+                obj.setProperty('studio_light', True)
+                obj.setPalette(self.palette)
+        return False

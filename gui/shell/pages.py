@@ -13,9 +13,9 @@ settings and running analyses come in later steps; their buttons are shown
 disabled with a note saying so.
 """
 
-from PyQt6.QtCore import QUrl, Qt
+from PyQt6.QtCore import QPoint, QRect, QSize, QUrl, Qt
 from PyQt6.QtGui import QDesktopServices
-from PyQt6.QtWidgets import (QFormLayout, QFrame, QHBoxLayout, QLabel,
+from PyQt6.QtWidgets import (QFormLayout, QFrame, QHBoxLayout, QLabel, QLayout,
                              QListWidget, QListWidgetItem, QPushButton,
                              QScrollArea, QSizePolicy, QToolButton, QVBoxLayout,
                              QWidget)
@@ -27,7 +27,8 @@ from gui.shell.panels import fmt
 
 LATER_LOGGING = ('Fixed for this session: to change it, start a new session from the same '
                  'source (File > New session) and log again.')
-ANALYSIS_KEYS = ('swelling', 'bagalkot', 'yang', 'yang_model', 'results', 'threshold')
+ANALYSIS_KEYS = ('swelling', 'bagalkot', 'yang', 'yang_model', 'results', 'threshold',
+                 'frame_ift')
 LATER_ANALYSIS = ('Running analyses from a session is built in a later step; until then '
                   'use the Pendant Drop window.')
 
@@ -68,6 +69,80 @@ def _crumb(key):
     return ' > '.join(reversed(parts)) or 'Analysis Builder'
 
 
+class FlowLayout(QLayout):
+    """Lays widgets out left to right and starts a new line when the next
+    one does not fit (Qt's flow layout example), so a row of buttons wraps
+    instead of holding the Settings panel wide."""
+
+    def __init__(self, parent=None, spacing=6):
+        super().__init__(parent)
+        self._items = []
+        self.setContentsMargins(0, 0, 0, 0)
+        self.setSpacing(spacing)
+
+    def addItem(self, item):
+        self._items.append(item)
+
+    def count(self):
+        return len(self._items)
+
+    def itemAt(self, i):
+        return self._items[i] if 0 <= i < len(self._items) else None
+
+    def takeAt(self, i):
+        return self._items.pop(i) if 0 <= i < len(self._items) else None
+
+    def expandingDirections(self):
+        return Qt.Orientation(0)
+
+    def hasHeightForWidth(self):
+        return True
+
+    def heightForWidth(self, width):
+        return self._place(QRect(0, 0, width, 0), apply=False)
+
+    def setGeometry(self, rect):
+        super().setGeometry(rect)
+        self._place(rect, apply=True)
+
+    def sizeHint(self):
+        return self.minimumSize()
+
+    def minimumSize(self):
+        size = QSize()
+        for it in self._items:
+            size = size.expandedTo(it.minimumSize())
+        m = self.contentsMargins()
+        return size + QSize(m.left() + m.right(), m.top() + m.bottom())
+
+    def _place(self, rect, apply):
+        m = self.contentsMargins()
+        r = rect.adjusted(m.left(), m.top(), -m.right(), -m.bottom())
+        x, y, line_h = r.x(), r.y(), 0
+        sp = self.spacing()
+        for it in self._items:
+            if it.isEmpty():
+                continue
+            hint = it.sizeHint()
+            w = min(hint.width(), max(r.width(), it.minimumSize().width()))
+            if x > r.x() and x + w > r.right() + 1:
+                x, y, line_h = r.x(), y + line_h + sp, 0
+            if apply:
+                it.setGeometry(QRect(QPoint(x, y), QSize(w, hint.height())))
+            x += w + sp
+            line_h = max(line_h, hint.height())
+        return y + line_h - rect.y() + m.bottom()
+
+
+def flow_row(*widgets):
+    """A widget holding ``widgets`` in a FlowLayout."""
+    w = QWidget()
+    f = FlowLayout(w)
+    for x in widgets:
+        f.addWidget(x)
+    return w
+
+
 class Section(QWidget):
     """A collapsible section with a form inside."""
 
@@ -83,7 +158,9 @@ class Section(QWidget):
         self.header.setChecked(True)
         self.header.setArrowType(Qt.ArrowType.DownArrow)
         self.header.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
-        self.header.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        # Ignored: a long title is clipped instead of holding the panel wide.
+        self.header.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Fixed)
+        self.header.setToolTip(title)
         self.header.toggled.connect(self._toggle)
         self.body = QWidget()
         self.form = QFormLayout(self.body)
@@ -91,6 +168,9 @@ class Section(QWidget):
         self.form.setHorizontalSpacing(10)
         self.form.setVerticalSpacing(5)
         self.form.setLabelAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+        # When the panel is narrow a label goes above its box, not beside it.
+        self.form.setRowWrapPolicy(QFormLayout.RowWrapPolicy.WrapLongRows)
+        self.form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow)
         lay.addWidget(self.header)
         lay.addWidget(self.body)
 
@@ -111,7 +191,7 @@ class Section(QWidget):
         row.addWidget(v, 1)
         u = QLabel(unit)
         u.setObjectName('FieldUnit')
-        u.setMinimumWidth(42)
+        u.setMinimumWidth(30)
         row.addWidget(u)
         self.form.addRow(label, row)
 
@@ -131,6 +211,45 @@ def callout(text, kind='warn'):
     return box
 
 
+def ift_result_section(rec, title='Result'):
+    """The full result of one drop-shape fit (an analyse_frame record):
+    what the old Static mode's result card showed."""
+    sec = Section(title)
+    if not rec.get('fit_ok'):
+        sec.widget(callout(f"The fit failed: {rec.get('error') or 'no reason given'}."))
+        return sec
+    r = rec.get('results') or {}
+    unc = rec.get('ift_unc_mNm')
+    sec.field('Interfacial tension', f"{rec['ift_mNm']:.2f}"
+              + (f" \u00b1 {unc:.2f}" if unc is not None and unc == unc else ''),
+              'mN/m', result=True)
+    fails = [(n, d) for n, ok, d in r.get('qc_checks', []) if not ok]
+    if rec.get('qc_pass'):
+        sec.widget(callout('Quality checks passed.', 'good'))
+    else:
+        sec.widget(callout('Quality checks not passed: ' + '; '.join(
+            f"{n} ({d})" for n, d in fails) + '. Treat this IFT with care.'))
+    sec.field('Shape factor beta', fmt(rec.get('beta')))
+    sec.field('Apex radius R0', fmt(rec.get('R0_mm')), 'mm')
+    sec.field('Volume', fmt(rec.get('volume_uL')), 'uL')
+    if rec.get('area_mm2') == rec.get('area_mm2') and rec.get('area_mm2') is not None:
+        sec.field('Surface area', fmt(rec['area_mm2']), 'mm2')
+    for label, key, unit in (('Worthington number Wo', 'Wo', ''),
+                             ('Fit error (RMSE)', 'rmse_px', 'px'),
+                             ('Tilt', 'tilt_deg', 'deg'),
+                             ('Density difference', 'delta_rho', 'kg/m3'),
+                             ('DS/DE cross-check IFT', 'ift_dsde_mNm', 'mN/m')):
+        if r.get(key) is not None:
+            sec.field(label, fmt(r[key]), unit)
+    u = r.get('uncertainty')
+    if u:
+        sec.field('Uncertainty from R0 fit', f"\u00b1 {fmt(u['c_R0_fit'])}", 'mN/m')
+        sec.field('from needle tolerance', f"\u00b1 {fmt(u['c_R0_calib'])}", 'mN/m')
+        sec.field('from beta fit', f"\u00b1 {fmt(u['c_beta'])}", 'mN/m')
+        sec.field('from densities', f"\u00b1 {fmt(u['c_rho'])}", 'mN/m')
+    return sec
+
+
 def note(text):
     lbl = QLabel(text)
     lbl.setObjectName('Note')
@@ -147,7 +266,7 @@ class SettingsPanel(QScrollArea):
         self.key = 'session'
         self.setWidgetResizable(True)
         self.setFrameShape(QFrame.Shape.NoFrame)
-        self.setMinimumWidth(280)
+        self.setMinimumWidth(200)
 
     def show_node(self, key):
         self.key = key
@@ -173,6 +292,7 @@ class SettingsPanel(QScrollArea):
         lay.addWidget(title)
         crumb = QLabel(_crumb(key))
         crumb.setObjectName('PageCrumb')
+        crumb.setWordWrap(True)
         lay.addWidget(crumb)
         status, reason = self.window.statuses.get(key, ('off', ''))
         srow = QHBoxLayout()
@@ -211,7 +331,7 @@ class SettingsPanel(QScrollArea):
             lay.addWidget(sec)
             b = QPushButton(icon('open'), 'Open session folder...')
             b.setObjectName('Primary')
-            b.clicked.connect(self.window.open_session_dialog)
+            b.clicked.connect(lambda: self.window.open_session_dialog())
             lay.addWidget(b, 0, Qt.AlignmentFlag.AlignLeft)
             return
         s = folder.session
@@ -290,7 +410,7 @@ class SettingsPanel(QScrollArea):
         lay.addWidget(sec)
         b = QPushButton(icon('calcurve'), 'Load calibration file...')
         b.setToolTip('Validate a gamma(c) template and copy it into the session folder')
-        b.clicked.connect(self.window.load_calibration)
+        b.clicked.connect(lambda: self.window.load_calibration())
         lay.addWidget(b, 0, Qt.AlignmentFlag.AlignLeft)
 
     def _page_source(self, folder, lay):

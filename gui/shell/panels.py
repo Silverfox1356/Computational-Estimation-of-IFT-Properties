@@ -28,7 +28,7 @@ class MessagesPanel(QTextEdit):
         super().__init__(parent)
         self.setObjectName('Messages')
         self.setReadOnly(True)
-        self.setLineWrapMode(QTextEdit.LineWrapMode.NoWrap)
+        self.setLineWrapMode(QTextEdit.LineWrapMode.WidgetWidth)   # never hidden off the side
 
     def add(self, text, level='info'):
         stamp = datetime.datetime.now().strftime('%H:%M:%S')

@@ -2,9 +2,9 @@
 gui.shell.analysis_pages
 ========================
 
-Settings pages for the analyses of an open session (core.analyses) and for
-changing the threshold of its frames: settings, a Run button, and the
-stored result in plain words.  Runs go through the window's job runner, so
+Settings pages for the analyses of an open session (core.analyses), for
+measuring one frame again (Single-Frame IFT) and for changing the threshold
+of its frames: settings, a Run button, and the result in plain words.  Runs go through the window's job runner, so
 they show progress, can be stopped, and refresh the tree and the result
 tabs when they finish.
 """
@@ -12,17 +12,17 @@ tabs when they finish.
 import math
 
 from PyQt6.QtCore import Qt
-from PyQt6.QtWidgets import (QButtonGroup, QCheckBox, QDoubleSpinBox, QLineEdit,
-                             QPushButton, QRadioButton, QSpinBox)
+from PyQt6.QtWidgets import (QButtonGroup, QCheckBox, QComboBox, QDoubleSpinBox,
+                             QLineEdit, QPushButton, QRadioButton, QSpinBox)
 
 from core import frame_log as fl
 from core.analyses import SWELLING_DEFAULT_THRESHOLD
 from core.session import YANG_MIN_POINTS, SessionError
 from gui.shell.draft_pages import _button, _row, _spin
-from gui.shell.pages import Section, callout, note
+from gui.shell.pages import Section, callout, ift_result_section, note
 from gui.shell.panels import fmt
 
-KEYS = ('swelling', 'bagalkot', 'yang', 'yang_model', 'results', 'threshold')
+KEYS = ('swelling', 'bagalkot', 'yang', 'yang_model', 'results', 'threshold', 'frame_ift')
 
 
 def _sci(text, name):
@@ -74,6 +74,39 @@ class AnalysisPages:
                                   'rebuilt), so this result is out of date. Run it again.'))
         return True
 
+    # -- single-frame IFT -------------------------------------------------------------
+    def page_frame_ift(self, folder, lay):
+        rows = {r['frame_index']: r for r in folder.log.rows}
+        order = sorted((i for i in folder.frame_indices()),
+                       key=lambda i: (rows.get(i, {}).get('time_s', 0.0), i))
+        sec = Section('Frame')
+        sec.widget(note('Fits one frame again with the session\'s scale, baseline, fluids and '
+                        'threshold and shows the full result. The frame log is not changed.'))
+        combo = QComboBox()
+        for i in order:
+            r = rows.get(i, {})
+            ift = r.get('ift_mNm')
+            combo.addItem(f"Frame {i}, t = {fmt(r.get('time_s'))} s"
+                          + (f", IFT {fmt(ift)} mN/m" if ift == ift and ift is not None else ''), i)
+        cur = self.w.graphics.frames.current()
+        if cur in order:
+            combo.setCurrentIndex(order.index(cur))
+        combo.currentIndexChanged.connect(
+            lambda k: self.w._show_frame(combo.itemData(k)) if k >= 0 else None)
+        sec.form.addRow('Frame', combo)
+        lay.addWidget(sec)
+        busy = self.w.job_running()
+        run = self._run_button(bool(order), lambda: self.w.measure_frame(combo.currentData()),
+                               'Measure IFT')
+        other = _button('Measure an image file...', 'image', self.w.measure_image_file,
+                        tip='An image taken with the same camera, needle and magnification: '
+                            'measured with this session\'s settings, not stored')
+        other.setEnabled(not busy)
+        lay.addWidget(_row(run, other))
+        fit = self.w.frame_fit
+        if fit is not None and fit.get('folder') is folder:
+            lay.addWidget(ift_result_section(fit['rec'], f"Result: {fit['label']}"))
+
     def _run_button(self, ok, slot, text='Run'):
         b = _button(text, 'compute', slot, primary=True)
         b.setEnabled(ok and not self.w.job_running())
@@ -124,7 +157,9 @@ class AnalysisPages:
         lo, hi = _sci_edit(lo0), _sci_edit(hi0)
         sec.form.addRow('D from (m2/s)', lo)
         sec.form.addRow('D to (m2/s)', hi)
-        moving = QCheckBox('Growing interface (thesis section 4.2.4)')
+        moving = QCheckBox('Growing interface')
+        moving.setToolTip('The interface moves outward as the drop swells '
+                          '(Bagalkot thesis, section 4.2.4)')
         moving.setChecked(bool(st.get('moving')))
         sec.widget(moving)
         sec.widget(note("Bagalkot's sphere model fitted to V(t): equally spaced D values, "
@@ -170,7 +205,8 @@ class AnalysisPages:
         doc = self._doc(folder, 'yang')
         st = (doc or {}).get('data', {}).get('settings', {})
         sec = Section('Search range')
-        auto = QRadioButton('Automatic (widens until the minimum is inside)')
+        auto = QRadioButton('Automatic')
+        auto.setToolTip('The range widens until the minimum is inside it')
         manual = QRadioButton('Manual')
         grp = QButtonGroup(sec)
         grp.addButton(auto)
@@ -286,7 +322,8 @@ class AnalysisPages:
         sec.field('Used for the log', level if level is not None else 'automatic (Otsu)')
         lay.addWidget(sec)
         sec = Section('Change and rebuild')
-        auto = QRadioButton('Automatic (Otsu) on every frame')
+        auto = QRadioButton('Automatic (Otsu)')
+        auto.setToolTip("Otsu's threshold, computed again on every frame")
         fixed = QRadioButton('Fixed level')
         grp = QButtonGroup(sec)
         grp.addButton(auto)
@@ -305,6 +342,7 @@ class AnalysisPages:
         def rebuild():
             ops = [] if auto.isChecked() else [('threshold', spin.value())]
             self.w.rebuild_log(None, prep_ops=ops)
-        b = _button('Rebuild log with this threshold', 'rebuild', rebuild, primary=True)
+        b = _button('Rebuild log', 'rebuild', rebuild, primary=True,
+                    tip='Fit every stored frame again with this threshold')
         b.setEnabled(bool(folder.frame_indices()) and not self.w.job_running())
         lay.addWidget(_row(b))

@@ -184,7 +184,8 @@ def window(tmp):
     app.processEvents()
     check("closing returns to Start", w.folder is None and w.graphics.tabText(0) == 'Start')
     w.close()
-    check("layout saved on close", ini.value('state') is not None)
+    check("layout saved on close", ini.value('split_h') is not None
+          and ini.value('split_v') is not None)
 
 
 if __name__ == "__main__":

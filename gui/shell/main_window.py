@@ -16,8 +16,10 @@ image or the camera, prepared on its reference frame.  Start logging creates
 the folder and logs the frames in the background, with the table and plots
 growing as frames arrive; when it ends the folder is opened like any other.
 
-The panels are dock widgets: they can be resized, moved, closed and
-floated; the layout is remembered between runs and Window > Reset Desktop
+The panels sit in splitters, so dragging a divider resizes only the two
+panels beside it.  The bar on the far left (as in VS Code) hides or brings
+back the Analysis Builder, the Settings and the Output panel, each on its
+own; the sizes are remembered between runs and Window > Reset Desktop
 restores the default.
 """
 
@@ -30,15 +32,15 @@ from pathlib import Path
 
 from PyQt6.QtCore import QSettings, QSize, Qt, QTimer
 from PyQt6.QtGui import QAction, QKeySequence
-from PyQt6.QtWidgets import (QDialog, QDialogButtonBox, QDockWidget, QFileDialog,
+from PyQt6.QtWidgets import (QDialog, QDialogButtonBox, QFileDialog,
                              QFormLayout, QGridLayout, QHBoxLayout, QInputDialog,
                              QLabel, QLineEdit, QMainWindow, QMessageBox, QPushButton,
-                             QTabWidget, QTreeWidget, QTreeWidgetItem, QVBoxLayout,
-                             QWidget)
+                             QSplitter, QTabWidget, QToolButton, QTreeWidget,
+                             QTreeWidgetItem, QVBoxLayout, QWidget)
 
 from core.frame_series import FrameSeriesCancelled
 from core.session import SessionError, SessionFolder
-from core.session_draft import DraftError, SessionDraft
+from core.session_draft import DraftError, SessionDraft, read_image
 from gui.shell import nodes
 from gui.shell.analysis_pages import AnalysisPages
 from gui.shell.draft_pages import DraftPages
@@ -47,7 +49,7 @@ from gui.shell.icons import icon, status_icon
 from gui.shell.pages import SettingsPanel
 from gui.shell.panels import Job, LogTable, MessagesPanel, ProgressPanel, fmt
 from gui.shell.ribbon import Ribbon
-from gui.shell.theme import STYLESHEET, light_palette
+from gui.shell.theme import STYLESHEET, StudioLook, light_palette
 from gui.window_utils import fit_to_screen
 
 APP_NAME = 'Drop Analysis Studio'
@@ -57,6 +59,12 @@ CAMERA_TYPES = ['Basler', 'Webcam']
 VIDEO_FILTER = 'Video files (*.mp4 *.avi *.mkv *.mov *.wmv);;All files (*)'
 IMAGE_FILTER = 'Image files (*.png *.jpg *.jpeg *.bmp *.tif *.tiff);;All files (*)'
 LIVE_NODES = ('source', 'crop', 'threshold')     # camera: show the live picture here
+# Side panels: (title, icon, default size, minimum, maximum) in px.  The
+# maxima keep the Graphics area usable however far a divider is dragged.
+PANELS = {'tree': ('Analysis Builder', 'windows', 250, 170, 420),
+          'settings': ('Settings', 'params', 340, 220, 560),
+          'output': ('Output', 'table', 190, 90, 420)}
+GRAPHICS_MIN = (340, 200)
 
 
 def _default_camera(camera_type):
@@ -127,8 +135,8 @@ class StudioWindow(QMainWindow):
         self.setWindowTitle(APP_NAME)
         self.setPalette(light_palette())      # not the OS dark mode
         self.setStyleSheet(STYLESHEET)
-        self.setDockOptions(QMainWindow.DockOption.AnimatedDocks
-                            | QMainWindow.DockOption.AllowTabbedDocks)
+        self.look = StudioLook(self)          # light dialogs, standard spin boxes
+        self.look.attach()
         self.store = settings_store or QSettings('IFTProperties', 'DropAnalysisStudio')
         self.camera_factory = camera_factory or _default_camera
         self.folder = None
@@ -141,6 +149,7 @@ class StudioWindow(QMainWindow):
         self._pick_cb = None
         self._latest = None
         self._latest_lock = threading.Lock()
+        self.frame_fit = None                 # last Single-Frame IFT: dict(folder, label, ...)
         self.draft_pages = DraftPages(self)
         self.analysis_pages = AnalysisPages(self)
         self.cam_timer = QTimer(self)
@@ -149,18 +158,15 @@ class StudioWindow(QMainWindow):
         self._make_actions()
         self._make_ribbon()
         self.graphics = GraphicsArea()
-        self.setCentralWidget(self.graphics)
-        self._make_docks()
+        self._make_panels()
         self._make_statusbar()
         self._wire()
 
         fit_to_screen(self, 1280, 800)
-        self._default_state = self.saveState()
-        geo, state = self.store.value('geometry'), self.store.value('state')
+        geo = self.store.value('geometry')
         if geo is not None:
             self.restoreGeometry(geo)
-        if state is not None:
-            self.restoreState(state)
+        self._restore_layout()
         self._refresh_recent()
         self.refresh_status()
         self.select_node('session')
@@ -170,7 +176,9 @@ class StudioWindow(QMainWindow):
     def _act(self, name, text, slot=None, tip='', enabled=True, shortcut=None):
         a = QAction(icon(name), text, self)
         if slot is not None:
-            a.triggered.connect(slot)
+            # triggered(checked) would arrive as the slot's first argument:
+            # load_calibration(False) or start_logging(path=False).
+            a.triggered.connect(lambda _=False: slot())
         a.setToolTip(tip or text.replace('\n', ' '))
         a.setStatusTip(tip or text.replace('\n', ' '))
         a.setEnabled(enabled)
@@ -197,16 +205,16 @@ class StudioWindow(QMainWindow):
                          'Calibrate the scale')
         self.a_base = A('baseline', 'Baseline', lambda: self.select_node('baseline'),
                         'Set the baseline at the needle tip')
-        self.a_measure = A('drop', 'Measure\nFrame', self.measure_reference,
-                           'Fit the reference frame (what the old Static mode did)')
+        self.a_measure = A('drop', 'Measure\nFrame', self.measure_current_frame,
+                           'Measure the IFT of the frame shown (Single-Frame IFT)')
         self.a_start = A('compute', 'Start\nLogging', self.start_logging,
                          'Create the session folder and log the frames')
         self.a_stop = A('stop', 'Stop', self.cancel_job, 'Stop the running task', enabled=False)
         self.a_rebuild = A('rebuild', 'Rebuild\nLog', lambda: self.select_node('log'),
                            'Fit the stored frames again (choose the columns first)')
         self.a_table = A('table', 'Frame\nTable', self.show_table, 'Show the frame log table')
-        self.a_next = A('next', 'Next', self.go_next_required,
-                        'Go to the first node that needs input')
+        self.a_next = A('next', 'Next', self.go_next,
+                        'Go to the next step')
         self.a_calib = A('calcurve', 'Load\nCalibration', self.load_calibration,
                          'Add a gamma(c) calibration to the session')
         self.a_swell = A('swell', 'Swelling\nCheck', lambda: self.select_node('swelling'),
@@ -258,7 +266,8 @@ class StudioWindow(QMainWindow):
         res.add_group('Export', [self.a_export, self.a_report])
         self.setMenuWidget(r)
 
-    def _make_docks(self):
+    def _make_panels(self):
+        """Activity bar | Analysis Builder | Settings | Graphics over Output."""
         host = QWidget()
         v = QVBoxLayout(host)
         v.setContentsMargins(0, 0, 0, 0)
@@ -301,14 +310,10 @@ class StudioWindow(QMainWindow):
             cell.addWidget(ic)
             cell.addWidget(lbl)
             cell.addStretch(1)
-            g.addLayout(cell, i // 3, i % 3)
+            g.addLayout(cell, i // 2, i % 2)
         v.addWidget(legend)
-        self.dock_tree = self._dock('Analysis Builder', host, Qt.DockWidgetArea.LeftDockWidgetArea)
 
         self.settings = SettingsPanel(self)
-        self.dock_settings = self._dock('Settings', self.settings, Qt.DockWidgetArea.LeftDockWidgetArea)
-        self.splitDockWidget(self.dock_tree, self.dock_settings, Qt.Orientation.Horizontal)
-
         self.bottom = QTabWidget()
         self.bottom.setObjectName('BottomTabs')
         self.messages = MessagesPanel()
@@ -317,31 +322,165 @@ class StudioWindow(QMainWindow):
         self.bottom.addTab(self.messages, 'Messages')
         self.bottom.addTab(self.progress, 'Progress')
         self.bottom.addTab(self.table, 'Table - Frame Log')
-        self.dock_bottom = self._dock('Output', self.bottom, Qt.DockWidgetArea.BottomDockWidgetArea)
-        self.setCorner(Qt.Corner.BottomLeftCorner, Qt.DockWidgetArea.LeftDockWidgetArea)
-        self.resizeDocks([self.dock_tree, self.dock_settings], [250, 330], Qt.Orientation.Horizontal)
-        self.resizeDocks([self.dock_bottom], [190], Qt.Orientation.Vertical)
+
+        self.panel_actions = {}
+        self.panels = {'tree': self._panel('tree', host),
+                       'settings': self._panel('settings', self.settings),
+                       'output': self._panel('output', self.bottom)}
+        self.right = QSplitter(Qt.Orientation.Vertical)
+        self.right.addWidget(self.graphics)
+        self.right.addWidget(self.panels['output'])
+        self.split = QSplitter(Qt.Orientation.Horizontal)
+        self.split.addWidget(self.panels['tree'])
+        self.split.addWidget(self.panels['settings'])
+        self.split.addWidget(self.right)
+        for sp in (self.split, self.right):
+            sp.setChildrenCollapsible(False)
+            sp.setHandleWidth(5)
+        for i, f in enumerate((0, 0, 1)):
+            self.split.setStretchFactor(i, f)     # a bigger window grows the graphics
+        self.right.setStretchFactor(0, 1)
+        self.right.setStretchFactor(1, 0)
+        self.graphics.setMinimumSize(*GRAPHICS_MIN)
+        self._panel_size = {}
+        self._tree_width = None
+        self.split.splitterMoved.connect(self._divider_moved)
+
+        bar = QWidget()
+        bar.setObjectName('ActivityBar')
+        bv = QVBoxLayout(bar)
+        bv.setContentsMargins(0, 4, 0, 4)
+        bv.setSpacing(2)
+        for name, (title, ic, *_size) in PANELS.items():
+            a = QAction(icon(ic), title, self)
+            a.setCheckable(True)
+            a.setChecked(True)
+            a.setToolTip(f"{title}: hide or show (the other panels keep their size)")
+            a.toggled.connect(lambda on, n=name: self.show_panel(n, on))
+            self.panel_actions[name] = a
+            b = QToolButton()
+            b.setDefaultAction(a)
+            b.setIconSize(QSize(24, 24))
+            b.setAutoRaise(True)
+            bv.addWidget(b)
+        bv.addStretch(1)
+        self.activity_bar = bar
+
+        central = QWidget()
+        h = QHBoxLayout(central)
+        h.setContentsMargins(0, 0, 0, 0)
+        h.setSpacing(0)
+        h.addWidget(bar)
+        h.addWidget(self.split, 1)
+        self.setCentralWidget(central)
 
         win = self.ribbon.add_page('Window')
-        win.add_group('Panels', [self._dock_action(d, name) for d, name in
-                                 ((self.dock_tree, 'windows'), (self.dock_settings, 'params'),
-                                  (self.dock_bottom, 'table'))])
+        win.add_group('Panels', list(self.panel_actions.values()))
         win.add_group('Layout', [self.a_reset])
 
-    def _dock(self, title, widget, area):
-        d = QDockWidget(title, self)
-        d.setObjectName(title.replace(' ', ''))
-        d.setWidget(widget)
-        d.setFeatures(QDockWidget.DockWidgetFeature.DockWidgetMovable
-                      | QDockWidget.DockWidgetFeature.DockWidgetFloatable
-                      | QDockWidget.DockWidgetFeature.DockWidgetClosable)
-        self.addDockWidget(area, d)
-        return d
+    def _panel(self, name, widget):
+        title, _ic, _size, lo, hi = PANELS[name]
+        box = QWidget()
+        box.setObjectName('Panel')
+        v = QVBoxLayout(box)
+        v.setContentsMargins(0, 0, 0, 0)
+        v.setSpacing(0)
+        head = QWidget()
+        head.setObjectName('PanelHeader')
+        hl = QHBoxLayout(head)
+        hl.setContentsMargins(0, 0, 2, 0)
+        hl.setSpacing(0)
+        lbl = QLabel(title)
+        lbl.setObjectName('PanelTitle')
+        hl.addWidget(lbl, 1)
+        hide = QToolButton()
+        hide.setObjectName('PanelHide')
+        hide.setText('\u2013')
+        hide.setToolTip(f"Hide {title} (bring it back from the bar on the left)")
+        hide.clicked.connect(lambda: self.show_panel(name, False))
+        hl.addWidget(hide)
+        v.addWidget(head)
+        v.addWidget(widget, 1)
+        if name == 'output':
+            box.setMinimumHeight(lo)
+            box.setMaximumHeight(hi)
+        else:
+            box.setMinimumWidth(lo)
+            box.setMaximumWidth(hi)
+        return box
 
-    def _dock_action(self, dock, icon_name):
-        a = dock.toggleViewAction()
-        a.setIcon(icon(icon_name))
-        return a
+    def show_panel(self, name, on):
+        """Hide or bring back one side panel; the Graphics area gives or
+        takes the space, the other panels keep their size."""
+        w = self.panels[name]
+        a = self.panel_actions[name]
+        if on != (not w.isHidden()):
+            sp = self.right if name == 'output' else self.split
+            i = sp.indexOf(w)
+            donor = sp.indexOf(self.graphics if sp is self.right else self.right)
+            if not on:
+                self._panel_size[name] = sp.sizes()[i]
+                w.hide()
+            else:
+                sizes = sp.sizes()
+                w.show()
+                want = self._panel_size.get(name, PANELS[name][2])
+                sizes[i] = want
+                sizes[donor] = max(sizes[donor] - want, 1)
+                sp.setSizes(sizes)
+        if a.isChecked() != on:
+            a.blockSignals(True)
+            a.setChecked(on)
+            a.blockSignals(False)
+        self._note_tree_width()
+
+    def _note_tree_width(self):
+        if not self.panels['tree'].isHidden():
+            self._tree_width = self.split.sizes()[0]
+
+    def _divider_moved(self, pos, index):
+        """Only the two panels beside a divider change.  QSplitter itself
+        hands the Analysis Builder the width the Settings panel can't take
+        once it reaches its maximum; give that to the Graphics area."""
+        sizes = self.split.sizes()
+        if index == 1:
+            self._tree_width = sizes[0]
+        elif (index == 2 and not self.panels['tree'].isHidden()
+              and getattr(self, '_tree_width', None) and sizes[0] != self._tree_width):
+            sizes[2] += sizes[0] - self._tree_width
+            sizes[0] = self._tree_width
+            self.split.blockSignals(True)
+            self.split.setSizes(sizes)
+            self.split.blockSignals(False)
+
+    def _default_layout(self):
+        for name in PANELS:
+            self.show_panel(name, True)
+        width = max(self.split.width(), 1000)
+        height = max(self.right.height(), 600)
+        t, s, o = (PANELS[k][2] for k in ('tree', 'settings', 'output'))
+        self.split.setSizes([t, s, max(width - t - s, GRAPHICS_MIN[0])])
+        self.right.setSizes([max(height - o, GRAPHICS_MIN[1]), o])
+        self._note_tree_width()
+
+    def _restore_layout(self):
+        self._default_layout()
+        h, v = self.store.value('split_h'), self.store.value('split_v')
+        if h is not None:
+            self.split.restoreState(h)
+        if v is not None:
+            self.right.restoreState(v)
+        hidden = self.store.value('hidden_panels') or []
+        if isinstance(hidden, str):
+            hidden = [hidden]
+        for name in PANELS:
+            self.show_panel(name, name not in hidden)
+        self._note_tree_width()
+
+    def _save_layout(self):
+        self.store.setValue('split_h', self.split.saveState())
+        self.store.setValue('split_v', self.right.saveState())
+        self.store.setValue('hidden_panels', [n for n, w in self.panels.items() if w.isHidden()])
 
     def _make_statusbar(self):
         sb = self.statusBar()
@@ -610,8 +749,9 @@ class StudioWindow(QMainWindow):
             a.setEnabled(not busy)
         for a in (self.a_crop, self.a_thresh, self.a_scale, self.a_base):
             a.setEnabled(d is not None and not busy)
-        self.a_measure.setEnabled(d is not None and not busy
-                                  and d.scale is not None and d.baseline is not None)
+        self.a_measure.setEnabled(not busy and (
+            (d is not None and d.scale is not None and d.baseline is not None)
+            or (has and bool(self.folder.frame_indices()))))
         self.a_start.setEnabled(d is not None and not busy and not d.missing())
         self.a_stop.setEnabled(busy)
         self.a_next.setEnabled(has or d is not None)
@@ -686,7 +826,7 @@ class StudioWindow(QMainWindow):
         self.table.select_frame(frame_index)
 
     def show_table(self):
-        self.dock_bottom.show()
+        self.show_panel('output', True)
         self.bottom.setCurrentWidget(self.table)
 
     def go_next_required(self):
@@ -697,24 +837,32 @@ class StudioWindow(QMainWindow):
         else:
             self.select_node(key)
 
+    def go_next(self):
+        """The next step of the work flow (nodes.NEXT_ORDER), from the node
+        shown in Settings."""
+        key = nodes.next_step(self.settings.key, self.statuses)
+        if key is None:
+            self.messages.add('This is the last step.', 'ok')
+            self.bottom.setCurrentWidget(self.messages)
+        else:
+            self.select_node(key)
+
     def reset_desktop(self):
-        self.restoreState(self._default_state)
-        for d in (self.dock_tree, self.dock_settings, self.dock_bottom):
-            d.show()
-            d.setFloating(False)
-        self.resizeDocks([self.dock_tree, self.dock_settings], [250, 330], Qt.Orientation.Horizontal)
-        self.resizeDocks([self.dock_bottom], [190], Qt.Orientation.Vertical)
+        self._default_layout()
 
     # --------------------------------------------------------------- actions
     def load_calibration(self, path=None):
         if self.folder is None and self.draft is None:
             return
+        if not isinstance(path, (str, Path)) or not str(path):
+            path = None
         if path is None:
             path, _ = QFileDialog.getOpenFileName(
                 self, 'Load gamma(c) calibration',
                 self.store.value('last_dir', str(Path.home())), 'CSV files (*.csv)')
             if not path:
                 return
+            self.store.setValue('last_dir', str(Path(path).parent))
         try:
             if self.draft is not None:
                 from core.calibration import CalibrationError, parse_calibration_template
@@ -794,27 +942,96 @@ class StudioWindow(QMainWindow):
 
         self.run_job(f"Running the {LABELS[name].lower()}", task, done, on_finally=finally_)
 
+    def _report_fit(self, label, rec):
+        if rec['fit_ok']:
+            self.messages.add(f"{label}: IFT {fmt(rec['ift_mNm'])} mN/m, beta "
+                              f"{fmt(rec['beta'])}, R0 {fmt(rec['R0_mm'])} mm, volume "
+                              f"{fmt(rec['volume_uL'])} uL, QC "
+                              f"{'passed' if rec['qc_pass'] else 'failed'}.",
+                              'ok' if rec['qc_pass'] else 'warn')
+            for name, ok, detail in (rec['results'] or {}).get('qc_checks', []):
+                if not ok:
+                    self.messages.add(f"QC {name}: {detail}", 'warn')
+        else:
+            self.messages.add(f"{label}: the fit failed: {rec['error']}", 'error')
+
     def measure_reference(self):
         d = self.draft
         if d is None or d.scale is None or d.baseline is None:
             return
 
         def done(rec):
-            if rec['fit_ok']:
-                self.messages.add(f"Reference frame: IFT {fmt(rec['ift_mNm'])} mN/m, beta "
-                                  f"{fmt(rec['beta'])}, R0 {fmt(rec['R0_mm'])} mm, volume "
-                                  f"{fmt(rec['volume_uL'])} uL, QC "
-                                  f"{'passed' if rec['qc_pass'] else 'failed'}.",
-                                  'ok' if rec['qc_pass'] else 'warn')
-                for name, ok, detail in (rec['results'] or {}).get('qc_checks', []):
-                    if not ok:
-                        self.messages.add(f"QC {name}: {detail}", 'warn')
-            else:
-                self.messages.add(f"Reference frame fit failed: {rec['error']}", 'error')
+            self._report_fit('Reference frame', rec)
             self.draft_changed(rebuild=True)
 
         self.run_job('Measuring the reference frame',
                      lambda progress, cancelled: d.measure_reference(), done)
+
+    def measure_current_frame(self):
+        """Ribbon Measure Frame: the reference frame of a session being set
+        up, or the frame shown of an open session."""
+        if self.draft is not None:
+            self.select_node('frame_ift')
+            self.measure_reference()
+        elif self.folder is not None:
+            self.select_node('frame_ift')
+            self.measure_frame()
+
+    def _show_fit(self, fit):
+        self.frame_fit = fit
+        self._report_fit(fit['label'], fit['rec'])
+        fr = self.graphics.frames
+        res = fit['rec'].get('results') if fit['rec']['fit_ok'] else None
+        if fit.get('frame_index') is not None:
+            fr.fit = (fit['frame_index'], res)
+            fr.show_frame(fit['frame_index'])
+        else:
+            fr.show_image(fit['rec']['stored_frame'], res, fit['label'])
+        self.graphics.setCurrentWidget(fr)
+        if self.settings.key == 'frame_ift':
+            self.settings.refresh()
+
+    def measure_frame(self, frame_index=None):
+        """Fit one logged frame again (default: the one in the Frame tab)
+        and show the full result; the log is not changed."""
+        f = self.folder
+        if f is None:
+            return
+        if frame_index is None:
+            frame_index = self.graphics.frames.current()
+        if frame_index is None:
+            return
+        row = next((r for r in f.log.rows if r['frame_index'] == frame_index), {})
+        label = f"Frame {frame_index} (t = {fmt(row.get('time_s'))} s)"
+        self.run_job(f"Measuring the IFT of {label[0].lower() + label[1:]}",
+                     lambda progress, cancelled: f.measure_frame(frame_index),
+                     lambda rec: self._show_fit(dict(folder=f, label=label,
+                                                     frame_index=frame_index, rec=rec)))
+
+    def measure_image_file(self, path=None):
+        """Fit an image taken with this session's set-up (not stored)."""
+        f = self.folder
+        if f is None:
+            return
+        if not isinstance(path, (str, Path)) or not str(path):
+            path, _ = QFileDialog.getOpenFileName(
+                self, "Measure an image with this session's settings",
+                self.store.value('last_dir', str(Path.home())), IMAGE_FILTER)
+            if not path:
+                return
+            self.store.setValue('last_dir', str(Path(path).parent))
+        try:
+            img = read_image(path)
+        except DraftError as e:
+            QMessageBox.warning(self, 'Cannot read the image', str(e))
+            return
+        label = Path(path).name
+
+        def task(progress, cancelled):
+            return f.measure_image(img)
+        self.run_job(f"Measuring the IFT of {label}", task,
+                     lambda rec: self._show_fit(dict(folder=f, label=label,
+                                                     frame_index=None, rec=rec)))
 
     # ----------------------------------------------------------------- logging
     def start_logging(self, path=None):
@@ -987,5 +1204,10 @@ class StudioWindow(QMainWindow):
                     pass
         self._stop_camera()
         self.store.setValue('geometry', self.saveGeometry())
-        self.store.setValue('state', self.saveState())
+        self._save_layout()
         super().closeEvent(e)
+        self.look.detach()
+
+    def showEvent(self, e):
+        self.look.attach()
+        super().showEvent(e)

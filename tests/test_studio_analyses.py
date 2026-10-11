@@ -131,7 +131,7 @@ def run(tmp):
     page = w.settings.widget()
     next(r for r in page.findChildren(QRadioButton) if r.text() == 'Fixed level').setChecked(True)
     page.findChildren(QSpinBox)[0].setValue(110)
-    button('Rebuild log with this threshold').click()
+    button('Rebuild log').click()
     check("rebuild finished", wait_job())
     check("results marked out of date", w.statuses['swelling'][0] == 'stale'
           and w.statuses['bagalkot'][0] == 'stale' and w.statuses['results'][0] == 'stale',

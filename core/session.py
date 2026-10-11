@@ -432,6 +432,32 @@ class SessionFolder:
         # the ADSA-P fit that is faster than the previous frame's solution.
         return analyse_frame(img, self.session.analysis_params())
 
+    def measure_frame(self, frame_index):
+        """Fit one stored frame again, exactly as the logger did; nothing is
+        written.  Returns the analyse_frame record."""
+        p = self._frames.get(int(frame_index))
+        if p is None:
+            raise SessionError(f"frame {frame_index} is not stored in this session")
+        return self._measure(_to_gray(_read_png(p)), split_prep(self.session.prep_ops)[1])
+
+    def measure_image(self, raw_frame):
+        """Fit an image taken with this session's set-up (same camera,
+        needle and magnification): the session's crop, threshold, scale,
+        baseline and fluids are applied; nothing is stored or logged.
+        Returns the analyse_frame record with the cropped frame under
+        'stored_frame'."""
+        src = self.session.source
+        h, w = raw_frame.shape[:2]
+        if src.get('width') and src.get('height') and (w, h) != (int(src['width']), int(src['height'])):
+            raise SessionError(f"the image is {w} x {h} px but this session's frames are "
+                               f"{src['width']} x {src['height']} px; its scale and baseline "
+                               f"would not apply")
+        crops, pixel = split_prep(self.session.prep_ops)
+        stored = _to_gray(apply_prep(raw_frame, crops))
+        rec = self._measure(stored, pixel)
+        rec['stored_frame'] = stored
+        return rec
+
     def log_image(self, img):
         """A single image is a session with one frame at t = 0."""
         return self.log_frame(img, 0.0, 0)

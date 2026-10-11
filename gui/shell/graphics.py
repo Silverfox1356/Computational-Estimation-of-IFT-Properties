@@ -318,6 +318,7 @@ class FrameViewer(QWidget):
         self.draft = None
         self.live_frame = None
         self.scale_marker = None             # ('line', p1, p2) | ('circle', c, r)
+        self.fit = None                      # (frame_index, fit results): Single-Frame IFT
         self._order = []                     # frame indices sorted by time
         self._rows = {}
         lay = QVBoxLayout(self)
@@ -391,6 +392,8 @@ class FrameViewer(QWidget):
     # -- session frames ---------------------------------------------------------
     def set_folder(self, folder, keep_position=False):
         cur = self.current() if keep_position else None
+        if folder is not self.folder:
+            self.fit = None
         self.draft = None
         self.live_frame = None
         self.scale_marker = None
@@ -450,6 +453,8 @@ class FrameViewer(QWidget):
         self.view.clear_overlays()
         if self.chk_overlay.isChecked():
             self.view.add_hline(self.folder.session.baseline['y_px'], COL_BASELINE, dashed=True)
+            if self.fit is not None and self.fit[0] == frame_index:
+                self._draw_fit(self.fit[1])
         r = self._rows.get(frame_index, {})
         parts = [f"Frame {frame_index}", f"t = {fmt(r.get('time_s'), 6)} s"]
         for key in ('ift_mNm', 'volume_uL', 'R0_mm', 'beta'):
@@ -463,6 +468,31 @@ class FrameViewer(QWidget):
         self.info.setText(f"{pos} of {n}   |   " + '   |   '.join(parts))
         if emit:
             self.frame_changed.emit(frame_index)
+
+    def show_image(self, img, res, label):
+        """An image that is not one of the session's frames (Single-Frame
+        IFT on an image file), with the baseline and its fit."""
+        if self.folder is None:
+            return
+        self.view.set_image(bgr_to_pixmap(img))
+        self.view.clear_overlays()
+        if self.chk_overlay.isChecked():
+            self.view.add_hline(self.folder.session.baseline['y_px'], COL_BASELINE, dashed=True)
+            self._draw_fit(res)
+        H, W = img.shape[:2]
+        self.info.setText(f"{label} (not a logged frame), {W} x {H} px   |   "
+                          f"step through the frames to go back")
+
+    def _draw_fit(self, res):
+        """Detected edges and the fitted outline of a fit result."""
+        if not res:
+            return
+        ys = np.asarray(res['ys_use'])
+        self.view.add_polyline(res['lxs'], ys, COL_EDGE)
+        self.view.add_polyline(res['rxs'], ys, COL_EDGE)
+        if res.get('ys_fit') is not None:
+            self.view.add_polyline(res['lxs_fit'], res['ys_fit'], COL_FIT, dashed=True)
+            self.view.add_polyline(res['rxs_fit'], res['ys_fit'], COL_FIT, dashed=True)
 
     # -- a session being set up -----------------------------------------------
     def set_draft(self, draft):
@@ -496,14 +526,7 @@ class FrameViewer(QWidget):
                 self.view.add_line(*m[1], *m[2], COL_SCALE)
             elif m is not None:
                 self.view.add_circle(*m[1], m[2], COL_SCALE)
-            res = (d.preview or {}).get('results') if raw is None else None
-            if res:
-                ys = np.asarray(res['ys_use'])
-                self.view.add_polyline(res['lxs'], ys, COL_EDGE)
-                self.view.add_polyline(res['rxs'], ys, COL_EDGE)
-                if res.get('ys_fit') is not None:
-                    self.view.add_polyline(res['lxs_fit'], res['ys_fit'], COL_FIT, dashed=True)
-                    self.view.add_polyline(res['rxs_fit'], res['ys_fit'], COL_FIT, dashed=True)
+            self._draw_fit((d.preview or {}).get('results') if raw is None else None)
         H, W = img.shape[:2]
         parts = [f"{'Live camera' if raw is not None else 'Reference frame'}, {W} x {H} px"]
         if d.kind == 'video':

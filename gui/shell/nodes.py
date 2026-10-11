@@ -26,6 +26,7 @@ NODES = (
     Node('scale', 'logger', 'Scale Calibration', 'ruler'),
     Node('baseline', 'logger', 'Baseline', 'baseline'),
     Node('log', 'session', 'Frame Log', 'table'),
+    Node('frame_ift', 'log', 'Single-Frame IFT', 'drop'),
     Node('analyses', 'session', 'Analyses', 'compute'),
     Node('swelling', 'analyses', 'Swelling Check', 'swell'),
     Node('yang', 'analyses', 'Diffusivity (Yang)', 'inv'),
@@ -35,6 +36,12 @@ NODES = (
     Node('report', 'results', 'Report', 'report'),
 )
 NODE = {n.key: n for n in NODES}
+
+# The order the Next button walks through: the work flow, which is not quite
+# the tree order (the scale and baseline come before Start logging).
+NEXT_ORDER = ('fluids', 'calibration', 'crop', 'threshold', 'scale', 'baseline', 'logger',
+              'log', 'frame_ift', 'swelling', 'yang', 'yang_model', 'bagalkot', 'results',
+              'report')
 
 # complete, ready to run, needs input, warning, not available, out of date
 STATUSES = ('done', 'ready', 'input', 'warn', 'off', 'stale')
@@ -80,6 +87,12 @@ def draft_statuses(draft):
     else:
         st['logger'] = ('ready', 'Ready to start logging.')
     st['log'] = ('off', 'Nothing logged yet.')
+    if 'scale' in missing or 'baseline' in missing:
+        st['frame_ift'] = ('off', 'Set the scale and the baseline first.')
+    elif draft.preview and draft.preview.get('fit_ok'):
+        st['frame_ift'] = ('done', f"Reference frame: IFT {draft.preview['ift_mNm']:.4g} mN/m.")
+    else:
+        st['frame_ift'] = ('ready', 'Measure the IFT of the reference frame.')
     st['session'] = (('input', f"New session, not saved yet: {len(missing)} item(s) needed.")
                      if missing else ('ready', 'New session, ready to log.'))
     return st
@@ -142,6 +155,9 @@ def node_statuses(folder):
     else:
         n_ok = sum(1 for r in log.rows if r['fit_ok'])
         st['log'] = ('done', f"{len(log)} row(s), {n_ok} measured.")
+    st['frame_ift'] = (('ready', 'Fit one logged frame again, or an image taken with the '
+                        'same set-up.') if folder.frame_indices()
+                       else ('off', 'No frames are stored in this session.'))
 
     avail = folder.availability()
     for key in ('swelling', 'yang', 'bagalkot'):
@@ -210,6 +226,21 @@ def _worst(st, parent, keys=None):
             if v[0] == status:
                 return v if status in ('warn', 'input', 'stale') else (status, '')
     return vals[0]
+
+
+def next_step(current, statuses):
+    """The node after ``current`` in the work flow (NEXT_ORDER) that is not
+    'off', or None at the end.  From a group node (Session, Source...) it is
+    the first step after it in the tree."""
+    if current in NEXT_ORDER:
+        later = NEXT_ORDER[NEXT_ORDER.index(current) + 1:]
+    else:
+        pos = {n.key: i for i, n in enumerate(NODES)}
+        later = [k for k in NEXT_ORDER if pos[k] > pos.get(current, -1)]
+    for key in later:
+        if statuses.get(key, ('off',))[0] != 'off':
+            return key
+    return None
 
 
 def next_required(statuses):
