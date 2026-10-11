@@ -109,3 +109,16 @@ def attempt_auto_baseline(edges_df, width_px, deviation_percent=5.0,
         return None
     except Exception:
         return None
+
+
+def binarize_drop_image(img, threshold):
+    """The Threshold dialog's processing, as a function: grey → blur →
+    fixed threshold → morphological close → 3-channel image.  Video
+    analysis applies it to every sampled frame so all frames are prepared
+    exactly like the one the user tuned."""
+    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY) if img.ndim == 3 else img
+    blurred = cv2.GaussianBlur(gray, (7, 7), 0)
+    _, binary = cv2.threshold(blurred, threshold, 255, cv2.THRESH_BINARY)
+    kernel = np.ones((5, 5), np.uint8)
+    cleaned = cv2.morphologyEx(binary, cv2.MORPH_CLOSE, kernel, iterations=3)
+    return cv2.cvtColor(cleaned, cv2.COLOR_GRAY2BGR)

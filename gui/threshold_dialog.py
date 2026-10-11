@@ -12,6 +12,7 @@ from PyQt6.QtWidgets import (QDialog, QVBoxLayout, QHBoxLayout, QLabel,
 from PyQt6.QtCore import Qt
 from gui.window_utils import fit_to_screen, scroll_body
 from PyQt6.QtGui import QImage, QPixmap
+from core.image_processing import binarize_drop_image
 
 
 class ThresholdDialog(QDialog):
@@ -92,13 +93,7 @@ class ThresholdDialog(QDialog):
     def update_threshold(self, val):
         self.current_threshold = val
         self.val_label.setText(f"Threshold: {val}")
-        gray = cv2.cvtColor(self.original_img, cv2.COLOR_BGR2GRAY)
-        blurred = cv2.GaussianBlur(gray, (7, 7), 0)
-        _, binary = cv2.threshold(blurred, val, 255, cv2.THRESH_BINARY)
-        kernel = np.ones((5, 5), np.uint8)
-        binary_cleaned = cv2.morphologyEx(binary, cv2.MORPH_CLOSE,
-                                          kernel, iterations=3)
-        self.processed_bgr = cv2.cvtColor(binary_cleaned, cv2.COLOR_GRAY2BGR)
+        self.processed_bgr = binarize_drop_image(self.original_img, val)
         self.set_pixmap(self.thresh_label, self.processed_bgr)
 
     def set_pixmap(self, label, cv_img):

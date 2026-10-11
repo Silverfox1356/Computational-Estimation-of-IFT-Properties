@@ -1,0 +1,33 @@
+# IFT curve template for Step 8 (Fit D, k to measured IFT)
+#
+# How to fill it in:
+#  - One measurement per row: time since the drop formed (s), then IFT (mN/m).
+#  - Keep the header row (time_s,ift_mNm). Columns may be swapped if the header names them.
+#  - Times must be >= 0 and all different. IFT must be > 0, in mN/m (1 dyn/cm = 1 mN/m).
+#  - Rows need not be sorted; the app sorts them by time.
+#  - Lines starting with # are ignored, so you can keep notes here.
+#  - One curve per file (one pressure, one drop). The fit needs at least 10 points.
+#  - Save as CSV (UTF-8) and press "Load IFT curve (CSV)...".
+#
+# The rows below are an EXAMPLE (Yang et al. 2006, Fig 5, P = 5.67 MPa, 27 C,
+# digitised). Replace them with your own measurements.
+time_s,ift_mNm
+25.3,39.782
+72,39.106
+124.9,38.708
+176.2,38.474
+226.2,38.295
+276.8,38.138
+329.8,37.982
+395,37.815
+459.1,37.696
+509.5,37.595
+559.7,37.501
+620.8,37.394
+719.8,37.221
+819.9,37.109
+919.8,36.979
+1039.9,36.822
+1140.4,36.713
+1240.2,36.563
+1340.2,36.524
