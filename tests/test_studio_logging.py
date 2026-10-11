@@ -68,7 +68,7 @@ def main():
 
 
 def run(tmp):
-    from PyQt6.QtCore import QSettings
+    from PyQt6.QtCore import QSettings, Qt
     from PyQt6.QtWidgets import QApplication, QMessageBox, QPushButton
     app = QApplication.instance() or QApplication(sys.argv)
     warnings = []
@@ -215,6 +215,11 @@ def run(tmp):
     while len(w.folder.log) < 2 and time.time() - t < 120:
         app.processEvents()
         time.sleep(0.02)
+    tabs = [w.graphics.tabText(i) for i in range(w.graphics.count())]
+    check("live: frame and IFT(t) side by side", tabs == ['Live']
+          and w.graphics.live.indexOf(w.graphics.frames) == 0
+          and w.graphics.live.indexOf(w.graphics.logplot) == 1
+          and w.graphics.logplot.combo.currentData() == 'ift_mNm', str(tabs))
     w.cancel_job()
     check("camera logging stopped", wait_job())
     log = w.folder.log
@@ -224,6 +229,64 @@ def run(tmp):
     check("camera released", w.camera is None and not w.cam_timer.isActive())
     check("stopped session sealed", w.folder.session.log_sha256 is not None
           and w.folder.problems == [])
+
+    # ------------------------------------------------- Yang from a single frame
+    print("── Yang: continue with single frame ──")
+    from PyQt6.QtWidgets import QListWidget
+    data = Path(__file__).resolve().parent.parent / 'data'
+    check("new image session", w.new_session('image', path=str(png)))
+    w.select_node('yang')
+    check("Yang asks for the picture first", w.statuses['yang'][0] == 'input'
+          and 'scale' in w.statuses['yang'][1], str(w.statuses['yang']))
+    d = w.draft
+    d.set_scale_direct(10)
+    d.auto_baseline()
+    w.draft_changed(rebuild=True)
+    check("then for the two CSVs", w.statuses['yang'][0] == 'input'
+          and 'CSV' in w.statuses['yang'][1], str(w.statuses['yang']))
+    w.select_node('yang')
+    check("Continue disabled without the CSVs",
+          not button('Continue with single frame').isEnabled())
+    w.load_calibration(str(data / 'calibration_5.67MPa.csv'))
+    w.load_ift_curve(str(data / 'ift_curve_5.67MPa.csv'))
+    check("Yang ready", w.statuses['yang'][0] == 'ready', str(w.statuses['yang']))
+    w.select_node('yang')
+    check("template buttons on the page",
+          sum(b.text() == 'Download template...' for b in
+              w.settings.widget().findChildren(QPushButton)) == 2)
+    dest = tmp / 'single frame'
+    real_start = w.start_logging
+    w.start_logging = lambda path=None: real_start(dest)
+    button('Continue with single frame').click()
+    check("saved, then D and k fitted", wait_job(600))
+    w.start_logging = real_start
+    f = w.folder
+    check("session saved with the IFT curve", f is not None and f.path == dest
+          and f.ift_curve_path is not None and f.calibration_path is not None)
+    doc = f.load_analysis('yang') if f else None
+    st = doc['data']['settings'] if doc else {}
+    check("Yang ran on the curve file with the kD grid", st.get('curve') == 'file'
+          and st.get('search') == 'grid' and st.get('kD_values') == [0.1, 0.5, 1, 2, 3, 4, 5],
+          str(st.get('kD_values')))
+    curves = doc['data']['curves'] if doc else []
+    check("one E-vs-D curve per kD", len(curves) == 7
+          and all(len(c['D']) == 60 for c in curves))
+    r = doc['data']['result'] if doc else {}
+    best = min(curves, key=lambda c: c['E_min']) if curves else {}
+    check("answer = lowest point of all curves", curves and best['kD'] == r['kD']
+          and abs(best['E_min'] - r['E_percent']) < 1e-9,
+          f"kD {r.get('kD')}, D {r.get('D', 0):.3g}, E {r.get('E_percent', 0):.3f} %")
+    tabs = [w.graphics.tabText(i) for i in range(w.graphics.count())]
+    check("Yang Fit, Simulation and Model tabs", {'Yang Fit', 'Simulation', 'Model'} <= set(tabs),
+          str(tabs))
+    yv = w.graphics.results['yang']
+    lst = yv.findChild(QListWidget)
+    check("a checkbox per kD curve", lst.count() == 7)
+    lst.item(0).setCheckState(Qt.CheckState.Unchecked)
+    line, low = yv.items[lst.item(0).data(Qt.ItemDataRole.UserRole)]
+    check("unticking hides that curve", not line.isVisible() and not low.isVisible())
+    yv._set_all(True)
+    check("Show all brings it back", line.isVisible())
 
     # ------------------------------------------------------------ discarding
     print("── discard ──")

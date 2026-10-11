@@ -27,14 +27,16 @@ from PyQt6.QtWidgets import (QCheckBox, QComboBox, QFrame, QGraphicsEllipseItem,
                              QGraphicsLineItem, QGraphicsPathItem, QGraphicsPixmapItem,
                              QGraphicsRectItem, QGraphicsScene, QGraphicsView,
                              QHBoxLayout, QLabel, QListWidget, QListWidgetItem,
-                             QPushButton, QSlider, QTabWidget, QToolBar, QVBoxLayout,
+                             QPushButton, QSlider, QSplitter, QTabWidget, QToolBar,
+                             QVBoxLayout,
                              QWidget)
 
 from core import frame_log as fl
 from core.session import SessionError
 from gui.shell.icons import icon
 from gui.shell.panels import fmt
-from gui.shell.result_views import BagalkotView, MeshView, SwellingView, YangView
+from gui.shell.result_views import (BagalkotView, ModelView, SimulationView,
+                                    SwellingView, YangView)
 from gui.shell.theme import PLOT_FAIL, PLOT_LINE, PLOT_PASS
 from gui.styles import make_cosmetic_pen as _cosmetic_pen
 
@@ -633,8 +635,11 @@ class GraphicsArea(QTabWidget):
         self.start = StartPage()
         self.frames = FrameViewer()
         self.logplot = LogPlot()
+        # While logging: the newest frame and IFT(t) side by side.
+        self.live = QSplitter(Qt.Orientation.Horizontal)
+        self.live.setChildrenCollapsible(False)
         self.results = dict(swelling=SwellingView(), bagalkot=BagalkotView(),
-                            yang=YangView(), mesh=MeshView())
+                            yang=YangView(), mesh=ModelView(), simulation=SimulationView())
         self.show_session(None)
 
     def show_session(self, folder):
@@ -648,21 +653,24 @@ class GraphicsArea(QTabWidget):
         self._maybe_add_plot(folder)
         self.show_results(folder)
 
-    RESULT_TABS = (('swelling', 'swelling', 'swell', 'Swelling'),
-                   ('bagalkot', 'bagalkot', 'inv', 'Bagalkot Fit'),
-                   ('yang', 'yang', 'inv', 'Yang Fit'),
-                   ('mesh', 'yang', 'mesh', 'Mesh'))
+    # (view, stored analyses it can show (first found wins), icon, title)
+    RESULT_TABS = (('swelling', ('swelling',), 'swell', 'Swelling'),
+                   ('bagalkot', ('bagalkot',), 'inv', 'Bagalkot Fit'),
+                   ('yang', ('yang',), 'inv', 'Yang Fit'),
+                   ('simulation', ('simulation',), 'series', 'Simulation'),
+                   ('mesh', ('yang', 'simulation'), 'mesh', 'Model'))
 
     def show_results(self, folder):
         """One tab per stored analysis result (added, refreshed or removed)."""
         docs = {}
-        for name in ('swelling', 'bagalkot', 'yang'):
+        for name in ('swelling', 'bagalkot', 'yang', 'simulation'):
             try:
                 docs[name] = folder.load_analysis(name) if folder else None
             except SessionError:
                 docs[name] = None
-        for view_key, doc_key, ic, title in self.RESULT_TABS:
-            view, doc = self.results[view_key], docs[doc_key]
+        for view_key, doc_keys, ic, title in self.RESULT_TABS:
+            view = self.results[view_key]
+            doc = next((docs[k] for k in doc_keys if docs[k] is not None), None)
             i = self.indexOf(view)
             if doc is None:
                 if i >= 0:
@@ -686,14 +694,18 @@ class GraphicsArea(QTabWidget):
         self.addTab(self.frames, icon('image'), 'Frame')
 
     def live_update(self, folder):
-        """While logging: show the newest frame and grow the plot."""
-        if self.frames.folder is not folder:
+        """While logging: the newest frame and IFT against time side by side,
+        both growing as frames come in (one 'Live' tab)."""
+        if self.indexOf(self.live) < 0 or self.frames.folder is not folder:
             self.clear()
-            self.addTab(self.frames, icon('image'), 'Frame')
+            self.live.addWidget(self.frames)
+            self.live.addWidget(self.logplot)
+            self.live.setStretchFactor(0, 1)
+            self.live.setStretchFactor(1, 1)
+            self.addTab(self.live, icon('series'), 'Live')
         self.frames.set_folder(folder)
         self.frames.step('last')
         self.logplot.set_log(folder.log)
-        self._maybe_add_plot(folder)
 
     def _maybe_add_plot(self, folder):
         if len(folder.log) > 1 and self.logplot.combo.count() and self.indexOf(self.logplot) < 0:

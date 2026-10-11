@@ -84,6 +84,8 @@ EDGE_TOL_LOG10 = 2.0 * D_SEARCH_XATOL
 # Without it kD is only as fine as the sweep grid — ~3× steps for a
 # 12-point general grid — and the answer is a grid point, not a minimum.
 KD_POLISH_XATOL = 5e-3
+# Automatic search: E(D) curves drawn for at most this many of the kD tried.
+MAX_AUTO_CURVES = 8
 
 
 class EstimationCancelled(Exception):
@@ -361,6 +363,7 @@ def estimate_D_k_yang(fem_results, domain_metadata, t_exp, gamma_exp,
                       t_offset=0.0,
                       near_tol=NEAR_FIT_TOL,
                       should_cancel=None,
+                      kD_values=None, curve_points=0, max_curves=MAX_AUTO_CURVES,
                       verbose=False):
     """
     Yang et al. (2006) nested one-parameter search for (D, k).
@@ -418,6 +421,18 @@ def estimate_D_k_yang(fem_results, domain_metadata, t_exp, gamma_exp,
                                    :class:`EstimationCancelled`.  Lets a GUI
                                    abort a sweep that would otherwise run for
                                    minutes.
+    kD_values : sequence or None – the user's own kD grid (as Yang's Fig 7a:
+                                   0.1, 0.5, 1, ..., 5).  Each kD gets its exact
+                                   minimum D in ``D_bounds``; no refinement or
+                                   widening, so kD is only as fine as the grid.
+    curve_points : int           – > 0: also return E(D) at that many
+                                   log-spaced D across the final ``D_bounds``
+                                   for each kD ('curves', the paper's Fig 7a).
+                                   Free with graded stepping (one simulation
+                                   per kD already covers every D).
+    max_curves : int             – automatic search only: curves for at most
+                                   this many of the kD it tried (spread over
+                                   the range, always including the best).
 
     Returns
     -------
@@ -450,12 +465,23 @@ def estimate_D_k_yang(fem_results, domain_metadata, t_exp, gamma_exp,
         'D_well_determined' – D_near spans ≤ D_WELL_DETERMINED_RATIO and
                             is not open-ended
         't_offset'        – the time offset used (s)
+        'curves'          – list of dict(kD, D, E[%], D_min, E_min): E(D)
+                            at fixed kD (Fig 7a); empty unless
+                            ``curve_points`` > 0 with graded stepping
+        'search'          – 'grid' (``kD_values``) or 'auto'
 
     Raises
     ------
     EstimationCancelled
         If ``should_cancel`` returns True while the sweep is running.
     """
+    grid = kD_values is not None
+    if grid:
+        kD_values = sorted({float(v) for v in kD_values})
+        if not kD_values or any(not (np.isfinite(v) and v > 0) for v in kD_values):
+            raise ValueError("the kD values must be positive numbers")
+        kD_range = [kD_values[0], kD_values[-1]]
+        refine, auto_widen = False, False
     kD_range = list(GENERAL_KD_RANGE if kD_range is None else kD_range)
     D_bounds = list(GENERAL_D_BOUNDS if D_bounds is None else D_bounds)
 
@@ -535,7 +561,8 @@ def estimate_D_k_yang(fem_results, domain_metadata, t_exp, gamma_exp,
         logD_lo, logD_hi = np.log10(D_bounds[0]), np.log10(D_bounds[1])
         # Log-spaced coarse grid: an order-of-magnitude search resolves kD
         # proportionally everywhere, unlike a linear grid over a wide range.
-        kD_list = list(np.geomspace(kD_range[0], kD_range[1], n_kD))
+        kD_list = (list(kD_values) if grid
+                   else list(np.geomspace(kD_range[0], kD_range[1], n_kD)))
         E_list, D_list = [], []
         for kD in kD_list:
             D_loc, E_loc = best_D_for(kD, logD_lo, logD_hi)
@@ -585,8 +612,8 @@ def estimate_D_k_yang(fem_results, domain_metadata, t_exp, gamma_exp,
         kD_best, D_best, E_best = float(kD_arr[j]), float(D_arr[j]), float(E_arr[j])
         logD_lo, logD_hi = np.log10(D_bounds[0]), np.log10(D_bounds[1])
 
-        at_kD_lo = (j == 0)
-        at_kD_hi = (j == len(kD_arr) - 1)
+        at_kD_lo = (j == 0) and len(kD_arr) > 1
+        at_kD_hi = (j == len(kD_arr) - 1) and len(kD_arr) > 1
         # EDGE_TOL_LOG10, not a tighter number: best_D_for's bounded Brent
         # search stops ~D_SEARCH_XATOL/2 short of a bound it is converging
         # onto, so a test tighter than that tolerance can never fire and a
@@ -642,6 +669,23 @@ def estimate_D_k_yang(fem_results, domain_metadata, t_exp, gamma_exp,
         or np.any(np.abs(np.log10(D_arr[near]) - np.log10(D_bounds[1])) < EDGE_TOL_LOG10))
     D_well = (D_near[1] / D_near[0] <= D_WELL_DETERMINED_RATIO) and not near_open
 
+    # --- E(D) at fixed kD for the plot (paper Figure 7a) ---------------
+    # With graded stepping the kD's one simulation already covers every D,
+    # so these cost no new simulations.
+    curves = []
+    if curve_points and fast:
+        D_curve = np.geomspace(D_bounds[0], D_bounds[1], int(curve_points))
+        if grid or len(kD_arr) <= max_curves:
+            ks = list(kD_arr)
+        else:
+            pick = np.unique(np.round(np.linspace(0, len(kD_arr) - 1, max_curves - 1)))
+            ks = sorted({float(kD_arr[int(i)]) for i in pick} | {kD_best})
+        for kD in ks:
+            E_curve = np.array([E_at(D, kD) for D in D_curve]) * 100.0
+            i = int(np.argmin(np.abs(kD_arr - kD)))
+            curves.append(dict(kD=float(kD), D=D_curve, E=E_curve,
+                               D_min=float(D_arr[i]), E_min=float(E_arr[i] * 100.0)))
+
     success = not on_edge
     if success:
         message = "global minimum found in the interior of the search box"
@@ -658,9 +702,14 @@ def estimate_D_k_yang(fem_results, domain_metadata, t_exp, gamma_exp,
         if at_D_lo or at_D_hi:
             hits.append("D bounds ({} edge)".format(
                 "lower" if at_D_lo else "upper"))
-        message = (f"minimum still on the {' and the '.join(hits)} after "
-                   f"{widen_steps} auto-widen step(s) — result is unreliable; "
-                   f"widen the search range manually")
+        if grid:
+            message = (f"the best fit is at the edge of your {' and your '.join(hits)}: "
+                       f"the true minimum may lie outside it; extend that range and run "
+                       f"again")
+        else:
+            message = (f"minimum still on the {' and the '.join(hits)} after "
+                       f"{widen_steps} auto-widen step(s) — result is unreliable; "
+                       f"widen the search range manually")
 
     return dict(
         D=D_best, k=k_best, kD=kD_best,
@@ -678,4 +727,5 @@ def estimate_D_k_yang(fem_results, domain_metadata, t_exp, gamma_exp,
         D_near=D_near, kD_near=kD_near, near_tol=near_tol,
         near_open=near_open, D_well_determined=bool(D_well),
         t_offset=float(t_offset),
+        curves=curves, search='grid' if grid else 'auto',
     )

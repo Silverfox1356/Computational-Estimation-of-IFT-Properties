@@ -89,6 +89,7 @@ def run(tmp):
         check(f"{name} refuses a single image", raises(lambda n=name: A.RUNNERS[n](one)))
 
     single_image_yang(tmp, one)
+    single_image_bagalkot(tmp, one)
 
     f = series_folder(tmp)
     n_qc = sum(r['qc_pass'] for r in f.log.rows)
@@ -204,10 +205,132 @@ def single_image_yang(tmp, one):
     check("curve source stored", st['curve'] == 'file' and st['frame_index'] == 0
           and len(st['curve_sha256']) == 64)
     check("result is current", not one.analysis_out_of_date('yang'))
+    sim = one.load_analysis('simulation')
+    check("Yang also stored a simulation at its best fit", sim is not None
+          and sim['data']['settings']['source'] == 'yang'
+          and np.isclose(sim['data']['settings']['D'], r['D'])
+          and np.isclose(sim['data']['settings']['k'], r['k']))
+    check("model summary has the domain and FEM checks",
+          d['model']['domain']['n_points'] > 10 and len(d['model']['fem']['checks']) == 8
+          and d['model']['fem']['all_pass'])
+    simulation_checks(tmp, one)
+    grid_checks(one)
     edited = tmp / 'edited.csv'
     edited.write_text(src.read_text(encoding='utf-8').replace('39.782', '39.700'), encoding='utf-8')
     one.set_ift_curve(edited)
     check("a new curve file marks the result out of date", one.analysis_out_of_date('yang'))
+
+
+def single_image_bagalkot(tmp, one):
+    """Bagalkot on a session of one image with V(t) from a CSV (the Bagalkot
+    window's Load volume curve)."""
+    print("── Bagalkot on a single image + volume curve file ──")
+    ok, why = one.bagalkot_availability()
+    check("single image without a curve: Bagalkot not available, says why",
+          not ok and 'volume curve file' in why, why)
+    src = ROOT / 'data' / 'volume_curve_template.csv'
+    c = one.set_volume_curve(src)
+    check("volume curve copied into the session", one.volume_curve_path is not None,
+          f"{len(c['t'])} points")
+    check("file route available", one.bagalkot_availability('file') == (True, ''))
+    check("log route refused", raises(lambda: A.run_bagalkot(one, curve='log')))
+    d = A.run_bagalkot(one, curve='file')
+    r = d['result']
+    check("Bagalkot ran on the curve file", 1e-12 < r['D'] < 1e-7, f"D = {r['D']:.3e} m2/s")
+    check("fitted on the file's points", len(d['curve']['t']) == len(c['t']))
+    check("curve source stored", d['settings']['curve'] == 'file'
+          and d['settings']['curve_file'] == 'volume_curve.csv')
+    check("result is current", not one.analysis_out_of_date('bagalkot'))
+    edited = tmp / 'vol_edited.csv'
+    edited.write_text(src.read_text(encoding='utf-8').replace('12.62444', '12.62000'),
+                      encoding='utf-8')
+    yang_before = one.analysis_out_of_date('yang')
+    one.set_volume_curve(edited)
+    check("a new volume file marks Bagalkot out of date", one.analysis_out_of_date('bagalkot'))
+    check("... and leaves Yang's state alone (it has its own file)",
+          one.analysis_out_of_date('yang') == yang_before)
+
+
+def grid_checks(one):
+    """Yang's own kD grid (his Fig 7a) and the E-vs-D curves."""
+    print("── Yang kD grid ──")
+    check("kD values from, to, step + extras", A.kD_grid(1, 5, 1, [0.1, 0.5]) ==
+          [0.1, 0.5, 1.0, 2.0, 3.0, 4.0, 5.0])
+    check("bad step refused", raises(lambda: A.kD_grid(1, 5, 0)))
+    check("too many values refused", raises(lambda: A.kD_grid(0.01, 100, 0.01)))
+    check("bad D axis refused", raises(lambda: A.run_yang(one, curve='file', kD_values=[1],
+                                                          D_grid=(1e-8, 1e-12, 60))))
+    t0 = time.time()
+    d = A.run_yang(one, curve='file', kD_values=[0.5, 1, 2, 4], D_grid=(1e-12, 1e-8, 40))
+    r, curves = d['result'], d['curves']
+    check("one curve per kD", [c['kD'] for c in curves] == [0.5, 1, 2, 4]
+          and all(len(c['D']) == 40 for c in curves), f"{time.time() - t0:.0f} s")
+    check("one simulation per kD", r['n_evaluations'] == 4, str(r['n_evaluations']))
+    check("exact minimum at or below the plotted points",
+          all(c['E_min'] <= min(c['E']) + 1e-9 for c in curves))
+    best = min(curves, key=lambda c: c['E_min'])
+    check("answer is the lowest of all curves", best['kD'] == r['kD']
+          and np.isclose(best['D_min'], r['D']))
+    rn = d['model']['domain']['r_inner_m']
+    check("k = kD D / rn", np.isclose(r['k'], r['kD'] * r['D'] / rn))
+    check("grid settings stored", d['settings']['search'] == 'grid'
+          and d['settings']['D_grid'] == [1e-12, 1e-8, 40])
+    a = A.run_yang(one, curve='file', kD_range=(0.5, 50.0), D_bounds=(1e-10, 1e-8))
+    check("automatic search also stores curves, best included",
+          0 < len(a['curves']) <= 8 and any(np.isclose(c['kD'], a['result']['kD'])
+                                            for c in a['curves']),
+          f"{len(a['curves'])} curves")
+
+
+def simulation_checks(tmp, one):
+    """The forward simulation (the Pendant window's Step 7) on one image."""
+    print("── forward simulation ──")
+    D0, k0, dur0, frame0 = A.simulation_defaults(one)
+    yang = one.load_analysis('yang')['data']
+    check("defaults come from the Yang fit", np.isclose(D0, yang['result']['D'])
+          and frame0 == 0, f"D {D0:.3g}, k {k0:.3g}, {dur0:g} s")
+    check("bad D refused", raises(lambda: A.run_simulation(one, D=-1)))
+    check("bad time step refused", raises(lambda: A.run_simulation(one, dt_s=0)))
+    check("too many steps refused", raises(lambda: A.run_simulation(one, duration_s=1e6,
+                                                                       dt_s=1e-3)))
+    stop = [0]
+
+    def cancel_soon():
+        stop[0] += 1
+        return stop[0] > 20
+    before = one.load_analysis('simulation')['data']['settings']
+    check("simulation can be cancelled",
+          raises(lambda: A.run_simulation(one, D=2e-9, k=2e-5, duration_s=300, dt_s=0.01,
+                                          is_cancelled=cancel_soon), FrameSeriesCancelled))
+    check("cancelled run kept the earlier result",
+          one.load_analysis('simulation')['data']['settings'] == before)
+    t0 = time.time()
+    seen = []
+    d = A.run_simulation(one, D=2e-9, k=3e-5, duration_s=300, dt_s=0.5,
+                         progress=lambda i, n, t: seen.append(i))
+    r = d['result']
+    check("uniform-step simulation (the old Step 7)", r['n_steps'] == 600
+          and abs(r['simulated_s'] - 300) < 1e-6, f"{time.time() - t0:.1f} s")
+    check("kD = k rn / D", np.isclose(r['kD'], 3e-5 * d['model']['domain']['r_inner_m'] / 2e-9))
+    check("concentration rises towards saturation", 0 < r['Cs_final'] <= 1.01
+          and np.all(np.diff(d['curve']['Cs']) > -1e-6), f"Cs {r['Cs_final']:.4f}")
+    check("gamma(t) from the calibration, falling", r['calibrated']
+          and d['curve']['gamma'][0] > d['curve']['gamma'][-1],
+          f"{d['curve']['gamma'][0]:.2f} -> {d['curve']['gamma'][-1]:.2f} mN/m")
+    check("snapshots over the run", len(d['snapshots']) >= 6
+          and len(d['snapshots'][0]['C']) == d['model']['n_nodes']
+          and abs(d['snapshots'][-1]['t'] - 300) < 1e-6)
+    check("no NaN in the field", not r['has_nan'])
+    check("measured IFT kept for the overlay", d['measured'] is not None)
+    check("step log kept short", 0 < len(d['diagnostics']) <= A.SIM_LOG_LINES + 1)
+    check("progress reported", len(seen) > 10)
+    check("settings stored", d['settings']['source'] == 'manual'
+          and d['settings']['stepping'] == 'uniform' and d['settings']['dt_s'] == 0.5)
+    g = A.run_simulation(one, D=2e-9, k=3e-5, duration_s=300)
+    check("automatic steps agree with fine uniform steps",
+          abs(g['result']['Cs_final'] - r['Cs_final']) < 0.01,
+          f"{g['result']['n_steps']} graded steps, Cs {g['result']['Cs_final']:.4f}")
+    check("simulation listed as available", one.availability()['simulation'] == (True, ''))
 
 
 if __name__ == "__main__":

@@ -31,6 +31,7 @@ NODES = (
     Node('swelling', 'analyses', 'Swelling Check', 'swell'),
     Node('yang', 'analyses', 'Diffusivity (Yang)', 'inv'),
     Node('yang_model', 'yang', 'Model: Geometry, Mesh, FEM', 'mesh'),
+    Node('simulation', 'analyses', 'Forward Simulation', 'series'),
     Node('bagalkot', 'analyses', 'Diffusivity (Bagalkot)', 'inv'),
     Node('results', 'session', 'Results', 'plot'),
     Node('report', 'results', 'Report', 'report'),
@@ -40,8 +41,12 @@ NODE = {n.key: n for n in NODES}
 # The order the Next button walks through: the work flow, which is not quite
 # the tree order (the scale and baseline come before Start logging).
 NEXT_ORDER = ('fluids', 'calibration', 'crop', 'threshold', 'scale', 'baseline', 'logger',
-              'log', 'frame_ift', 'swelling', 'yang', 'yang_model', 'bagalkot', 'results',
+              'log', 'frame_ift', 'swelling', 'yang', 'yang_model', 'simulation', 'bagalkot',
+              'results',
               'report')
+
+# The analyses stored in a session folder (core.analyses.RUNNERS).
+ANALYSES = ('swelling', 'yang', 'simulation', 'bagalkot')
 
 # complete, ready to run, needs input, warning, not available, out of date
 STATUSES = ('done', 'ready', 'input', 'warn', 'off', 'stale')
@@ -88,8 +93,14 @@ def draft_statuses(draft):
         st['logger'] = ('ready', 'Ready to start logging.')
     st['log'] = ('off', 'Nothing logged yet.')
     if draft.kind == 'image':
-        st['yang'] = ('off', 'Start logging saves the image as a one-frame session; Diffusivity '
-                      '(Yang) can then use its drop outline with an IFT curve file (CSV).')
+        if 'scale' in missing or 'baseline' in missing:
+            st['yang'] = ('input', 'Single frame: set the scale and the baseline first.')
+        elif not (draft.calibration_path and draft.ift_curve_path):
+            st['yang'] = ('input', 'Single frame: load the gamma(c) calibration and the '
+                          'IFT-vs-time CSV.')
+        else:
+            st['yang'] = ('ready', 'Ready: Continue with single frame.')
+        st['analyses'] = st['yang']
     if 'scale' in missing or 'baseline' in missing:
         st['frame_ift'] = ('off', 'Set the scale and the baseline first.')
     elif draft.preview and draft.preview.get('fit_ok'):
@@ -163,7 +174,7 @@ def node_statuses(folder):
                        else ('off', 'No frames are stored in this session.'))
 
     avail = folder.availability()
-    for key in ('swelling', 'yang', 'bagalkot'):
+    for key in ANALYSES:
         ok, why = avail[key]
         if not ok and key == 'yang' and folder.measured_frames():
             st[key] = ('input', why)        # one drop outline is enough; it needs a curve
@@ -171,27 +182,28 @@ def node_statuses(folder):
             st[key] = ('off', why)
         elif folder.load_analysis(key) is not None:
             if folder.analysis_out_of_date(key):
-                st[key] = ('stale', 'The log changed since this analysis ran; run it again.')
+                st[key] = ('stale', folder.out_of_date_reason(key) + ' Run it again.')
             else:
                 caveat = result_caveat(key, folder.load_analysis(key))
                 st[key] = ('warn', caveat) if caveat else ('done', 'Results stored in the session.')
         else:
             st[key] = ('ready', 'Ready to run.')
-    st['yang_model'] = (('off', 'Available once Diffusivity (Yang) can run.')
-                        if st['yang'][0] in ('off', 'input')
-                        else ('ready', 'Built from the drop outline of one frame when Yang runs.'))
-    if all(st[k][0] == 'off' for k in ('swelling', 'yang', 'bagalkot')):
+    st['yang_model'] = (('off', 'Available once a frame of the drop has been measured.')
+                        if st['simulation'][0] == 'off'
+                        else ('ready', 'Built from the drop outline of one frame when Yang '
+                              'or the simulation runs.'))
+    if all(st[k][0] == 'off' for k in ANALYSES):
         st['analyses'] = ('off', 'No analysis can run on this session yet.')
     else:
         st['analyses'] = _worst(st, 'analyses')
 
-    stored = [k for k in ('swelling', 'bagalkot', 'yang') if st[k][0] in ('done', 'stale', 'warn')]
+    stored = [k for k in ANALYSES if st[k][0] in ('done', 'stale', 'warn')]
     if stored:
         stale = [k for k in stored if st[k][0] == 'stale']
         st['results'] = (('stale', 'Some results are out of date.') if stale
                          else ('done', f"{len(stored)} analysis result(s) stored."))
-        if 'yang' in stored:
-            st['yang_model'] = ('done', 'Built when Diffusivity (Yang) ran.')
+        if 'yang' in stored or 'simulation' in stored:
+            st['yang_model'] = ('done', 'Built when Diffusivity (Yang) or the simulation ran.')
     else:
         st['results'] = ('off', 'Run an analysis first.')
     st['report'] = ('off', 'The printable report is the next step of the overhaul.')
@@ -212,9 +224,12 @@ def result_caveat(key, doc):
         return 'The stored result cannot be read.'
     if key == 'yang':
         if not r.get('success', True):
-            return 'The fit did not converge: ' + (r.get('message') or 'see the page.')
+            return 'Check the result: ' + (r.get('message') or 'see the page.')
         if not r.get('D_well_determined', True):
             return 'D is not well determined by this curve (see the page).'
+    if key == 'simulation' and (r.get('has_nan') or not r.get('calibrated', True)):
+        return ('The concentration has NaN values; use smaller time steps.' if r.get('has_nan')
+                else 'No gamma(c) calibration: only Cs(t) was simulated, not the IFT.')
     if key == 'bagalkot' and r.get('at_edge'):
         return 'The best D is at the edge of the search range; widen it.'
     return ''

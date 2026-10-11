@@ -149,8 +149,8 @@ def run(tmp):
         from PyQt6.QtWidgets import QLineEdit, QRadioButton
         w.select_node('yang')
         page = w.settings.widget()
-        next(r for r in page.findChildren(QRadioButton) if r.text() == 'Manual').setChecked(True)
-        edits = page.findChildren(QLineEdit)
+        next(r for r in page.findChildren(QRadioButton) if r.text() == 'Manual range').setChecked(True)
+        edits = page.findChildren(QLineEdit)[-4:]           # the manual range's four boxes
         for e, v in zip(edits, ('1e-10', '1e-8', '0.5', '50')):   # D from, D to, kD from, kD to
             e.setText(v)
         button('Run').click()
@@ -162,7 +162,8 @@ def run(tmp):
         check("Yang in the tree: complete, or a warning when the fit flags its own result",
               w.statuses['yang'] == (('warn', caveat) if caveat else ('done', 'Results stored in the session.'))
               and w.statuses['yang_model'][0] == 'done', f"{w.statuses['yang'][0]}: {caveat}")
-        check("Yang Fit and Mesh tabs", {'Yang Fit', 'Mesh'} <= set(tabs()), str(tabs()))
+        check("Yang Fit, Simulation and Model tabs",
+              {'Yang Fit', 'Simulation', 'Model'} <= set(tabs()), str(tabs()))
         D_before = doc['data']['result']['D'] if doc else None
         w.select_node('yang')
         button('Run').click()
@@ -174,7 +175,7 @@ def run(tmp):
               and doc['data']['result']['D'] == D_before)
 
     print("── Yang on a single image + IFT curve file ──")
-    from PyQt6.QtWidgets import QLineEdit, QRadioButton
+    from PyQt6.QtWidgets import QDoubleSpinBox, QLabel, QLineEdit, QRadioButton
     from _synthetic_video import render_drop
     from core.session import SessionFolder
     from test_analyses import ROOT, session
@@ -204,7 +205,8 @@ def run(tmp):
     check("Run disabled for the frame log route", not button('Run').isEnabled())
     radio('IFT curve file').setChecked(True)
     radio('Manual').setChecked(True)
-    for e, v in zip(w.settings.widget().findChildren(QLineEdit), ('1e-10', '1e-8', '0.5', '50')):
+    for e, v in zip(w.settings.widget().findChildren(QLineEdit)[-4:],
+                    ('1e-10', '1e-8', '0.5', '50')):
         e.setText(v)
     button('Run').click()
     check("Yang ran", wait_job())
@@ -212,11 +214,58 @@ def run(tmp):
     check("stored with the curve file as source", doc is not None
           and doc['data']['settings']['curve'] == 'file'
           and doc['data']['settings']['frame_index'] == 0)
-    check("Yang Fit and Mesh tabs", {'Yang Fit', 'Mesh'} <= set(tabs()), str(tabs()))
+    check("Yang Fit, Simulation and Model tabs",
+          {'Yang Fit', 'Simulation', 'Model'} <= set(tabs()), str(tabs()))
     w.select_node('yang')
-    labels = [l.text() for l in w.settings.widget().findChildren(__import__(
-        'PyQt6.QtWidgets', fromlist=['QLabel']).QLabel)]
+    labels = [l.text() for l in w.settings.widget().findChildren(QLabel)]
     check("result page names the curve file", 'the file ift_curve.csv' in labels)
+
+    print("── forward simulation ──")
+    check("simulation node complete after Yang", w.statuses['simulation'][0] == 'done',
+          str(w.statuses['simulation']))
+    w.select_node('yang_model')
+    labels = [l.text() for l in w.settings.widget().findChildren(QLabel)]
+    check("model page lists the FEM checks", labels.count('pass') >= 8, str(labels.count('pass')))
+    w.select_node('simulation')
+    page = w.settings.widget()
+    edits = page.findChildren(QLineEdit)
+    edits[0].setText('2e-9')
+    edits[1].setText('3e-5')
+    radio('Fixed time step').setChecked(True)
+    spins = [sp for sp in page.findChildren(QDoubleSpinBox) if sp.suffix() == ' s']
+    spins[0].setValue(120)                    # duration
+    spins[1].setValue(0.5)                    # time step
+    button('Run').click()
+    check("simulation ran", wait_job())
+    doc = w.folder.load_analysis('simulation')
+    st = doc['data']['settings'] if doc else {}
+    check("entered values used", st.get('source') == 'manual' and st.get('D') == 2e-9
+          and st.get('dt_s') == 0.5 and st.get('duration_s') == 120, str(st))
+    check("Simulation tab shown", w.graphics.currentWidget() is w.graphics.results['simulation'])
+    sv = w.graphics.results['simulation']
+    check("concentration field drawn", sv.canvas is not None and len(sv.canvas.figure.axes) >= 1
+          and sv.slider.maximum() >= 5)
+    sv.slider.setValue(0)
+    check("slider shows an early snapshot", sv.slider_label.text().startswith('1 of'))
+    w.select_node('simulation')
+    check("result on the page", button('Show the simulation') is not None)
+
+    print("── Bagalkot on a single image + volume curve file ──")
+    check("Bagalkot not available without a curve", w.statuses['bagalkot'][0] == 'off',
+          str(w.statuses['bagalkot']))
+    w.select_node('bagalkot')
+    check("Run disabled", not button('Run').isEnabled())
+    w.load_volume_curve(str(ROOT / 'data' / 'volume_curve_template.csv'))
+    check("Bagalkot ready with the file", w.statuses['bagalkot'][0] == 'ready',
+          str(w.statuses['bagalkot']))
+    w.select_node('bagalkot')
+    check("volume file chosen", radio('Volume curve file').isChecked())
+    button('Run').click()
+    check("Bagalkot ran", wait_job())
+    doc = w.folder.load_analysis('bagalkot')
+    check("stored with the file as source", doc is not None
+          and doc['data']['settings']['curve'] == 'file')
+    check("Bagalkot Fit tab", 'Bagalkot Fit' in tabs(), str(tabs()))
     check("no unexpected warnings", not warnings, '; '.join(map(str, warnings)))
     w.close()
 

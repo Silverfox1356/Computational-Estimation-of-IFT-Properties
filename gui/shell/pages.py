@@ -27,7 +27,8 @@ from gui.shell.panels import fmt
 
 LATER_LOGGING = ('Fixed for this session: to change it, start a new session from the same '
                  'source (File > New session) and log again.')
-ANALYSIS_KEYS = ('swelling', 'bagalkot', 'yang', 'yang_model', 'results', 'threshold',
+ANALYSIS_KEYS = ('swelling', 'bagalkot', 'yang', 'yang_model', 'simulation', 'results',
+                 'threshold',
                  'frame_ift')
 LATER_ANALYSIS = ('Running analyses from a session is built in a later step; until then '
                   'use the Pendant Drop window.')
@@ -311,6 +312,22 @@ class SettingsPanel(QScrollArea):
             self.window.draft_pages.build(key, lay)
         elif folder is not None and key in ANALYSIS_KEYS:
             self.window.analysis_pages.build(key, folder, lay)
+        elif folder is None and key in ('yang', 'yang_model', 'simulation'):
+            lay.addWidget(note('To find D and k from one picture of a drop: start a new session '
+                               'from the image, set the scale and baseline, then open '
+                               'Diffusivity (Yang) and click Continue with single frame. '
+                               'For a video, the camera or a saved session folder, the IFT '
+                               'against time comes from the logged frames.'))
+            row = QHBoxLayout()
+            for kind, ic, text in (('image', 'image', 'New session from an image...'),):
+                b = QPushButton(icon(ic), text)
+                b.clicked.connect(lambda _=False, k=kind: self.window.new_session(k))
+                row.addWidget(b)
+            ob = QPushButton(icon('open'), 'Open a session folder...')
+            ob.clicked.connect(lambda: self.window.open_session_dialog())
+            row.addWidget(ob)
+            row.addStretch(1)
+            lay.addLayout(row)
         elif folder is None and key != 'session':
             lay.addWidget(note('Open a session folder to see this.'))
         elif build is not None:
@@ -387,6 +404,13 @@ class SettingsPanel(QScrollArea):
         sec.field('Name', n.get('name') or '-')
         sec.field('Outer diameter', fmt(n['od_mm'], 6), 'mm')
         sec.field('Diameter tolerance', fmt(100 * n.get('tol_rel', 0.01), 3), '%')
+        from gui.shell.draft_pages import _button, _row, id_spin, id_value
+        idd = id_spin(n.get('id_mm'))
+        sec.form.addRow('Inner diameter (mm)', idd)
+        sec.widget(_row(_button('Apply inner diameter', 'params',
+                                lambda: self.window.set_needle_id(id_value(idd)),
+                                tip='Only the diffusion model uses it; Yang and simulation '
+                                    'results made with another value become out of date')))
         lay.addWidget(sec)
         lay.addWidget(note(LATER_LOGGING))
 
@@ -408,10 +432,13 @@ class SettingsPanel(QScrollArea):
             sec.widget(note('No calibration stored in this session. Diffusivity (Yang) '
                             'needs one; the other analyses do not.'))
         lay.addWidget(sec)
-        b = QPushButton(icon('calcurve'), 'Load calibration file...')
-        b.setToolTip('Validate a gamma(c) template and copy it into the session folder')
-        b.clicked.connect(lambda: self.window.load_calibration())
-        lay.addWidget(b, 0, Qt.AlignmentFlag.AlignLeft)
+        from gui.shell.draft_pages import _button, _row
+        row = [_button('Load calibration file...', 'calcurve', self.window.load_calibration,
+                       tip='Validate a gamma(c) template and copy it into the session folder')]
+        if folder.session.calibration:
+            row.append(_button('Remove', 'close', self.window.clear_calibration,
+                               tip='Remove the calibration from the session folder'))
+        lay.addWidget(_row(*row))
 
     def _page_source(self, folder, lay):
         src = folder.session.source

@@ -143,6 +143,7 @@ class StudioWindow(QMainWindow):
         self.draft = None
         self.camera = None
         self.logging = False
+        self._after_logging = None           # Continue with single frame: (IFT csv, Yang kwargs)
         self.scale_method = 'needle'
         self.statuses = nodes.node_statuses(None)
         self.job = None
@@ -223,6 +224,8 @@ class StudioWindow(QMainWindow):
                         'Diffusivity and mass-transfer coefficient from IFT(t)')
         self.a_bagalkot = A('inv', 'Bagalkot\n(D)', lambda: self.select_node('bagalkot'),
                             'Diffusivity from the drop volume V(t)')
+        self.a_sim = A('series', 'Simulate', lambda: self.select_node('simulation'),
+                       'Forward diffusion simulation for a chosen D and k')
         self.a_results = A('plot', 'Results', lambda: self.select_node('results'),
                            'Stored analysis results')
         self.a_export = A('export', 'Export\nLog', self.export_log, 'Save a copy of log.csv')
@@ -249,7 +252,7 @@ class StudioWindow(QMainWindow):
         home.add_group('Prepare', [self.a_crop, self.a_thresh, self.a_scale, self.a_base])
         home.add_group('Logger', [self.a_measure, self.a_start, self.a_stop])
         home.add_group('Frame Log', [self.a_table, self.a_rebuild])
-        home.add_group('Analyses', [self.a_swell, self.a_yang, self.a_bagalkot])
+        home.add_group('Analyses', [self.a_swell, self.a_yang, self.a_bagalkot, self.a_sim])
         home.add_group('Guide', [self.a_next])
         src = r.add_page('Source')
         src.add_group('New Session', [self.a_video, self.a_image, self.a_camera])
@@ -260,7 +263,7 @@ class StudioWindow(QMainWindow):
         logp.add_group('Frame Log', [self.a_table, self.a_rebuild, self.a_export])
         an = r.add_page('Analyses')
         an.add_group('Inputs', [self.a_calib])
-        an.add_group('Run', [self.a_swell, self.a_yang, self.a_bagalkot])
+        an.add_group('Run', [self.a_swell, self.a_yang, self.a_bagalkot, self.a_sim])
         res = r.add_page('Results')
         res.add_group('Results', [self.a_results])
         res.add_group('Export', [self.a_export, self.a_report])
@@ -741,7 +744,7 @@ class StudioWindow(QMainWindow):
         busy = self.job_running()
         d = self.draft
         for a in (self.a_table, self.a_rebuild, self.a_export, self.a_swell, self.a_yang,
-                  self.a_bagalkot, self.a_results):
+                  self.a_bagalkot, self.a_sim, self.a_results):
             a.setEnabled(has and not busy)
         self.a_calib.setEnabled((has or d is not None) and not busy)
         self.a_close.setEnabled((has or d is not None) and not busy)
@@ -881,44 +884,165 @@ class StudioWindow(QMainWindow):
                           f"{'will be copied' if self.draft else 'copied'} into the session.", 'ok')
         self.refresh_status()
 
-    def load_ift_curve(self, path=None):
-        """Copy an IFT-vs-time CSV into the open session for Diffusivity (Yang)."""
+    # -- needle inner diameter and presets ------------------------------------------
+    def set_needle_id(self, id_mm):
+        if self.folder is None:
+            return
+        try:
+            self.folder.set_needle_id(id_mm)
+        except SessionError as e:
+            self.messages.add(str(e), 'error')
+            QMessageBox.warning(self, 'Inner diameter not changed', str(e))
+            return
+        self.messages.add('Needle inner diameter: '
+                          + (f"{id_mm:g} mm." if id_mm else 'automatic (70 % of OD).'), 'ok')
+        self.refresh_status()
+
+    def preset_save(self, kind, values, preset=None):
+        """Save ``values`` into ``preset`` (a user preset), or as a new one."""
+        from core import presets as P
+        what = 'needle' if kind == 'needle' else 'fluid system'
+        try:
+            if preset is not None and not preset.builtin:
+                P.save_user_preset(kind, preset.name, values, overwrite=True)
+                name = preset.name
+            else:
+                suggestion = '' if preset is None else preset.name + ' (copy)'
+                name, ok = QInputDialog.getText(self, 'Save preset as',
+                                                f"Name for this {what} preset:",
+                                                text=suggestion)
+                if not ok:
+                    return
+                existing = P.find_preset(kind, name.strip())
+                overwrite = False
+                if existing is not None and not existing.builtin:
+                    if QMessageBox.question(
+                            self, 'Replace preset?',
+                            f"A preset named '{existing.name}' already exists. Replace it?"
+                    ) != QMessageBox.StandardButton.Yes:
+                        return
+                    overwrite = True
+                name = P.save_user_preset(kind, name, values, overwrite=overwrite).name
+        except (P.PresetError, ValueError, OSError) as e:
+            self.messages.add(f"Preset not saved: {e}", 'error')
+            QMessageBox.warning(self, 'Preset not saved', str(e))
+            return
+        if self.draft is not None:
+            if kind == 'needle':
+                self.draft.needle = dict(self.draft.needle, name=name)
+            else:
+                self.draft.fluids = dict(self.draft.fluids, name=name)
+        self.messages.add(f"Preset '{name}' saved.", 'ok')
+        self.refresh_status()
+
+    def preset_delete(self, kind, preset):
+        from core import presets as P
+        if preset is None or preset.builtin:
+            return
+        if QMessageBox.question(self, 'Delete preset?',
+                                f"Delete the preset '{preset.name}'? The values in the fields "
+                                f"are kept.") != QMessageBox.StandardButton.Yes:
+            return
+        try:
+            P.delete_user_preset(kind, preset.name)
+        except (P.PresetError, OSError) as e:
+            QMessageBox.warning(self, 'Preset not deleted', str(e))
+            return
+        self.messages.add(f"Preset '{preset.name}' deleted.", 'ok')
+        self.refresh_status()
+
+    def preset_import(self, path=None):
+        from core import presets as P
+        if not isinstance(path, (str, Path)) or not str(path):
+            path, _ = QFileDialog.getOpenFileName(self, 'Import preset',
+                                                  self.store.value('last_dir', str(Path.home())),
+                                                  'Preset files (*.json)')
+            if not path:
+                return
+        try:
+            try:
+                p = P.import_preset(path)
+            except P.PresetError as e:
+                if 'already exists' not in str(e) or QMessageBox.question(
+                        self, 'Replace preset?', f"{e}\nReplace it with the imported one?"
+                ) != QMessageBox.StandardButton.Yes:
+                    raise
+                p = P.import_preset(path, overwrite=True)
+        except (P.PresetError, OSError) as e:
+            self.messages.add(f"Preset not imported: {e}", 'error')
+            QMessageBox.warning(self, 'Preset not imported', str(e))
+            return
+        self.messages.add(f"Imported the {p.kind} preset '{p.name}'.", 'ok')
+        self.refresh_status()
+
+    # Curves from a file, for an analysis instead of the logged values:
+    # kind -> (what, session setter, template file, used by)
+    CURVES = dict(ift=('IFT curve', 'set_ift_curve', 'ift_curve_template.csv',
+                       'Diffusivity (Yang)'),
+                  volume=('volume curve', 'set_volume_curve', 'volume_curve_template.csv',
+                          'Diffusivity (Bagalkot)'),
+                  calibration=('gamma(c) calibration', None, 'calibration_template.csv',
+                               'IFT Calibration Curve'))
+
+    def load_curve(self, kind, path=None):
+        """Copy a curve CSV (IFT or volume against time) into the open session."""
+        what, setter, _, _ = self.CURVES[kind]
         folder = self.folder
-        if folder is None:
+        if folder is None and not (kind == 'ift' and self.draft is not None):
             return
         if not isinstance(path, (str, Path)) or not str(path):
             path = None
         if path is None:
             path, _ = QFileDialog.getOpenFileName(
-                self, 'Load IFT curve', self.store.value('last_dir', str(Path.home())),
+                self, f"Load {what}", self.store.value('last_dir', str(Path.home())),
                 'CSV files (*.csv);;All files (*)')
             if not path:
                 return
             self.store.setValue('last_dir', str(Path(path).parent))
-        if folder.ift_curve_path is not None and QMessageBox.question(
-                self, 'Replace the IFT curve?',
-                f"Replace the IFT curve stored in this session with {Path(path).name}?"
+        if folder is None:                       # single frame, not saved yet
+            try:
+                c = self.draft.set_ift_curve(path)
+            except DraftError as e:
+                self.messages.add(str(e), 'error')
+                QMessageBox.warning(self, 'IFT curve not loaded', str(e))
+                return
+            self.messages.add(f"IFT curve {Path(path).name}: {len(c['t'])} points; copied "
+                              f"into the session when it is saved.", 'ok')
+            for w in c['warnings']:
+                self.messages.add(w, 'warn')
+            self.draft_changed(rebuild=True)
+            return
+        current = folder.ift_curve_path if kind == 'ift' else folder.volume_curve_path
+        if current is not None and QMessageBox.question(
+                self, f"Replace the {what}?",
+                f"Replace the {what} stored in this session with {Path(path).name}?"
         ) != QMessageBox.StandardButton.Yes:
             return
         try:
-            c = folder.set_ift_curve(path)
+            c = getattr(folder, setter)(path)
         except (SessionError, OSError) as e:
             self.messages.add(str(e), 'error')
-            QMessageBox.warning(self, 'IFT curve not loaded', str(e))
+            QMessageBox.warning(self, f"{what.capitalize()} not loaded", str(e))
             return
-        self.messages.add(f"IFT curve {Path(path).name}: {len(c['t'])} points copied into "
-                          f"the session.", 'ok')
+        self.messages.add(f"{what.capitalize()} {Path(path).name}: {len(c['t'])} points "
+                          f"copied into the session.", 'ok')
         for w in c['warnings']:
             self.messages.add(w, 'warn')
         self.refresh_status()
 
-    def save_ift_template(self):
-        """Save the IFT-curve CSV template (columns and example rows)."""
-        src = Path(__file__).resolve().parent.parent.parent / 'data' / 'ift_curve_template.csv'
+    def load_ift_curve(self, path=None):
+        self.load_curve('ift', path)
+
+    def load_volume_curve(self, path=None):
+        self.load_curve('volume', path)
+
+    def save_curve_template(self, kind):
+        """Save a curve CSV template (columns and example rows)."""
+        what, _, name, used_by = self.CURVES[kind]
+        src = Path(__file__).resolve().parent.parent.parent / 'data' / name
         dest, _ = QFileDialog.getSaveFileName(
-            self, 'Save IFT curve template',
-            str(Path(self.store.value('last_dir', str(Path.home()))) / 'ift_curve_template.csv'),
-            'CSV files (*.csv)')
+            self, f"Save {what} template",
+            str(Path(self.store.value('last_dir', str(Path.home()))) / name), 'CSV files (*.csv)')
         if not dest:
             return
         try:
@@ -926,8 +1050,91 @@ class StudioWindow(QMainWindow):
         except OSError as e:
             QMessageBox.warning(self, 'Template not saved', str(e))
             return
-        self.messages.add(f"Template saved to {dest}. Replace the example rows with your "
-                          f"own data, then Load IFT curve (CSV).", 'ok')
+        self.messages.add(f"Template saved to {dest}. Replace the example rows with your own "
+                          f"data, then load it in {used_by}.", 'ok')
+
+    def save_ift_template(self):
+        self.save_curve_template('ift')
+
+    def continue_single_frame(self, yang_kwargs, path=None):
+        """Single frame (an image session): save the session (``path`` skips
+        the folder question), copy the IFT curve in, then run Diffusivity
+        (Yang) on the picture's outline."""
+        d = self.draft
+        if d is None or d.kind != 'image':
+            return
+        if not (d.calibration_path and d.ift_curve_path):
+            self.messages.add('Load the gamma(c) calibration and the IFT-vs-time CSV first.',
+                              'warn')
+            return
+        self._after_logging = (d.ift_curve_path, dict(yang_kwargs))
+        if not self.start_logging(path):
+            self._after_logging = None
+
+    def _run_after_logging(self, folder):
+        """The second half of Continue with single frame, once the image is saved."""
+        job, self._after_logging = self._after_logging, None
+        if job is None or self.folder is not folder:
+            return
+        ift_path, kw = job
+        try:
+            folder.set_ift_curve(ift_path)
+        except (SessionError, OSError) as e:
+            self.messages.add(f"The IFT curve could not be copied: {e}", 'error')
+            return
+        self.refresh_status()
+        ok, why = folder.yang_availability('file')
+        if not ok:
+            self.messages.add(f"Diffusivity (Yang) can't run: {why}", 'error')
+            self.select_node('yang')
+            return
+        self.run_analysis('yang', curve='file', **kw)
+
+    def export_result(self, name, path=None):
+        """Save a stored analysis result as CSV (core.result_export)."""
+        from core.analyses import LABELS
+        from core.result_export import export_result
+        folder = self.folder
+        if folder is None:
+            return
+        try:
+            doc = folder.load_analysis(name)
+        except SessionError as e:
+            QMessageBox.warning(self, 'Nothing to export', str(e))
+            return
+        if doc is None:
+            return
+        if not isinstance(path, (str, Path)) or not str(path):
+            path, _ = QFileDialog.getSaveFileName(
+                self, f"Export {LABELS[name].lower()} results",
+                str(Path(self.store.value('last_dir', str(Path.home())))
+                    / f"{folder.path.name}_{name}.csv"), 'CSV files (*.csv)')
+            if not path:
+                return
+            self.store.setValue('last_dir', str(Path(path).parent))
+        try:
+            files = export_result(name, doc['data'], path, source=folder.path.name)
+        except (OSError, ValueError, KeyError, TypeError) as e:
+            self.messages.add(f"Export failed: {e}", 'error')
+            QMessageBox.warning(self, 'Export failed', str(e))
+            return
+        self.messages.add(f"{LABELS[name]} exported to " + ' and '.join(str(f) for f in files)
+                          + '.', 'ok')
+
+    def clear_calibration(self):
+        if self.folder is None or QMessageBox.question(
+                self, 'Remove the calibration?',
+                'Remove the gamma(c) calibration from this session? Stored results keep the '
+                'values they were made with; Diffusivity (Yang) needs a calibration to run '
+                'again.') != QMessageBox.StandardButton.Yes:
+            return
+        try:
+            self.folder.clear_calibration()
+        except OSError as e:
+            QMessageBox.warning(self, 'Calibration not removed', str(e))
+            return
+        self.messages.add('Calibration removed from the session.', 'ok')
+        self.refresh_status()
 
     def export_log(self):
         if self.folder is None:
@@ -977,6 +1184,10 @@ class StudioWindow(QMainWindow):
                 summary = r.get('message', '')
             elif name == 'bagalkot':
                 summary = f"D = {fmt(r['D'], 4)} m2/s (SF {fmt(r['SF'], 3)})"
+            elif name == 'simulation':
+                summary = (f"kD = {fmt(r['kD'], 4)}, final Cs {fmt(r['Cs_final'], 4)}"
+                           + (f", final IFT {fmt(r['gamma_final'], 4)} mN/m"
+                              if r.get('gamma_final') is not None else ''))
             else:
                 summary = (f"D = {fmt(r['D'], 4)} m2/s, k = {fmt(r['k'], 4)} m/s, "
                            f"E = {fmt(r['E_percent'], 3)} %")
@@ -1150,6 +1361,8 @@ class StudioWindow(QMainWindow):
                 self.messages.add(f"Could not seal the log: {e}", 'error')
             self._stop_camera()
             self.open_session(folder.path, ask=False)
+            if self._after_logging is not None:
+                self._run_after_logging(self.folder)
 
         self.run_job('Logging frames', task, done, on_progress=lambda: self._log_progress(folder),
                      on_finally=finally_)

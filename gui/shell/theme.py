@@ -114,6 +114,10 @@ QGraphicsView { border: none; background: transparent; }
 QToolBar { background: #ffffff; border: none; border-bottom: 1px solid #e3e3e3; spacing: 3px; padding: 2px; }
 
 QTextEdit#Messages { font-family: Consolas, 'Cascadia Mono', monospace; font-size: 9pt; border: none; }
+QScrollArea#ModelInfo { background: #ffffff; border: none; }
+QLabel#ModelInfoText { background: #ffffff; color: #1f2328; padding: 4px; }
+QPlainTextEdit#StepLog { background: #f8f9fa; color: #343a40; border: 1px solid #dee2e6;
+    font-family: Consolas, 'Cascadia Mono', monospace; font-size: 8pt; }
 QTableView { gridline-color: #e3e6ea; border: none; selection-background-color: #cce4f7;
     selection-color: #1f2328; }
 QHeaderView::section { background: #eef1f5; border: 1px solid #d6dce4; padding: 3px 6px; font-weight: 600; }

@@ -214,7 +214,9 @@ def run(tmp):
     fi.finish()
     av = SessionFolder.open(p3).availability()
     check("image measured", rec['fit_ok'], f"IFT {rec['ift_mNm']:.2f} mN/m")
-    check("time series analyses not available", not any(ok for ok, _ in av.values()))
+    check("time series analyses not available",
+          not any(av[k][0] for k in ('swelling', 'bagalkot', 'yang')))
+    check("the forward simulation runs on one image", av['simulation'] == (True, ''))
     check("reason names the single image", 'single image' in av['swelling'][1], av['swelling'][1])
 
     print("── crop and threshold ──")

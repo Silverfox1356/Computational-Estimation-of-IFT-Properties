@@ -82,6 +82,7 @@ class SessionDraft:
     columns: list = None           # chosen optional columns
     analyses: list = None
     calibration_path: str = None   # copied into the folder when logging starts
+    ift_curve_path: str = None     # single frame: IFT(t) for Yang, copied in too
     preview: dict = None           # last measure_reference() record
 
     def __post_init__(self):
@@ -205,12 +206,36 @@ class SessionDraft:
         self.preview = None
 
     # -- fluids, needle ------------------------------------------------------------
-    def set_needle(self, od_mm, tol_rel=None, name=None):
+    def set_ift_curve(self, path):
+        """Single frame: the IFT-vs-time CSV Yang's fit will use (validated
+        now, copied into the session folder when it is saved).  Returns the
+        parsed curve; None clears it."""
+        if path is None:
+            self.ift_curve_path = None
+            return None
+        from core.ift_data import IFTDataError, load_ift_curve
+        try:
+            c = load_ift_curve(path)
+        except IFTDataError as e:
+            raise DraftError(f"IFT curve not accepted: {e}") from None
+        self.ift_curve_path = str(path)
+        return c
+
+    def set_needle(self, od_mm, tol_rel=None, name=None, id_mm=...):
+        """``id_mm``: the inner diameter, used only for the diffusion model's
+        domain; None = automatic (70 % of the outer diameter); left out = keep."""
         if not (isinstance(od_mm, (int, float)) and 0 < od_mm <= 100):
             raise DraftError("the needle diameter must be between 0 and 100 mm")
-        self.needle = dict(self.needle, od_mm=float(od_mm),
-                           **({} if tol_rel is None else dict(tol_rel=float(tol_rel))),
-                           **({} if name is None else dict(name=name)))
+        needle = dict(self.needle, od_mm=float(od_mm),
+                      **({} if tol_rel is None else dict(tol_rel=float(tol_rel))),
+                      **({} if name is None else dict(name=name)))
+        if id_mm is not ...:
+            needle.pop('id_mm', None)
+            if id_mm is not None:
+                needle['id_mm'] = float(id_mm)
+        if needle.get('id_mm') is not None and not 0 < needle['id_mm'] < needle['od_mm']:
+            raise DraftError("the inner diameter must be above 0 and below the outer diameter")
+        self.needle = needle
         self.preview = None
 
     def set_fluids(self, **values):
@@ -249,10 +274,10 @@ class SessionDraft:
         x0, y0 = max(0, int(x)), max(0, int(y))
         x1, y1 = min(W, int(x + w)), min(H, int(y + h))
         if x1 - x0 < 5 or y1 - y0 < 5:
-            raise DraftError("the box is too small; draw it around the needle")
+            raise DraftError(f"the box is too small; draw it around the {mode}")
         px, marker = measure_reference(img[y0:y1, x0:x1], mode)
         if not px:
-            raise DraftError("no object found in the box; draw it tightly around the needle")
+            raise DraftError(f"no object found in the box; draw it tightly around the {mode}")
         if marker[0] == 'line':
             marker = ('line', (marker[1][0] + x0, marker[1][1] + y0),
                       (marker[2][0] + x0, marker[2][1] + y0))

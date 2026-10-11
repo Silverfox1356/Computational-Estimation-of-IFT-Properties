@@ -14,6 +14,8 @@ can be opened again without the app remembering how it was made::
       ift_curve.csv     copy of an IFT-vs-time curve from a file, if one is
                         used for Yang instead of the logged IFT (for example
                         when only one image of the drop was logged)
+      volume_curve.csv  copy of a volume-vs-time curve from a file, if one is
+                        used for Bagalkot instead of the logged volume
       analyses/         settings and results of each analysis (JSON)
 
 Logging writes the folder (:meth:`SessionFolder.create`, then
@@ -67,6 +69,7 @@ LOG_FILE = 'log.csv'
 FRAMES_DIR = 'frames'
 CALIBRATION_FILE = 'calibration.csv'
 IFT_CURVE_FILE = 'ift_curve.csv'
+VOLUME_CURVE_FILE = 'volume_curve.csv'
 ANALYSES_DIR = 'analyses'
 
 SOURCE_KINDS = ('video', 'camera', 'image')
@@ -225,7 +228,8 @@ class Session:
               formed, frames before it are not logged)
     scale     pixel_to_m, method ('auto' | 'manual' | 'figure'), reference
     baseline  y_px (stored-frame coordinates), method
-    needle    od_mm, tol_rel, name
+    needle    od_mm, tol_rel, name, id_mm (optional; the diffusion model's
+              domain, default 70 % of od_mm)
     fluids    density_inner, density_outer (kg/m3), rho_in_tol_rel,
               rho_out_tol_rel, name, pressure_MPa, temperature_C
     prep_ops  [('crop', (x, y, w, h)) | ('threshold', value), ...] in the
@@ -274,6 +278,9 @@ class Session:
         _number(self.baseline, 'y_px', 'baseline', lo=-1)
         _number(self.needle, 'od_mm', 'needle', lo=0, hi=100)
         _number(self.needle, 'tol_rel', 'needle', lo=-1e-12, hi=1, required=False)
+        id_mm = _number(self.needle, 'id_mm', 'needle', lo=0, hi=100, required=False)
+        if id_mm is not None and id_mm >= self.needle['od_mm']:
+            raise SessionError("needle: the inner diameter must be below the outer diameter")
         rin = _number(self.fluids, 'density_inner', 'fluids', lo=0, hi=30000)
         rout = _number(self.fluids, 'density_outer', 'fluids', lo=0, hi=30000)
         if rin == rout:
@@ -362,6 +369,12 @@ class SessionFolder:
     def ift_curve_path(self):
         """The IFT-vs-time curve copied in from a file, or None."""
         p = self.path / IFT_CURVE_FILE
+        return p if p.is_file() else None
+
+    @property
+    def volume_curve_path(self):
+        """The volume-vs-time curve copied in from a file, or None."""
+        p = self.path / VOLUME_CURVE_FILE
         return p if p.is_file() else None
 
     def _scan_frames(self):
@@ -668,6 +681,32 @@ class SessionFolder:
         self._write_session()
         self.problems = [p for p in self.problems if p.code != 'calibration_missing']
 
+    def clear_calibration(self):
+        """Remove the gamma(c) calibration from the session (the Pendant
+        window's Clear).  Stored results keep the values they were made with."""
+        p = self.path / CALIBRATION_FILE
+        if p.is_file():
+            p.unlink()
+        self.session.calibration = None
+        self._write_session()
+        self.problems = [q for q in self.problems if q.code != 'calibration_missing']
+
+    def set_needle_id(self, id_mm):
+        """Set the needle's inner diameter (mm; None = automatic, 70 % of the
+        outer diameter).  It only shapes the diffusion model's domain, so it
+        can change after logging; Yang and simulation results made with
+        another value become out of date."""
+        od = self.session.needle['od_mm']
+        if id_mm is not None:
+            id_mm = float(id_mm)
+            if not (math.isfinite(id_mm) and 0 < id_mm < od):
+                raise SessionError(f"the inner diameter must be above 0 and below the outer "
+                                   f"diameter ({od:g} mm)")
+        self.session.needle = {k: v for k, v in self.session.needle.items() if k != 'id_mm'}
+        if id_mm is not None:
+            self.session.needle['id_mm'] = id_mm
+        self._write_session()
+
     def set_ift_curve(self, src_path):
         """Validate an IFT-vs-time CSV (core.ift_data) and copy it into the
         folder as the curve Yang can fit instead of the logged IFT.  Returns
@@ -679,6 +718,30 @@ class SessionFolder:
             raise SessionError(f"IFT curve not accepted: {e}") from None
         _atomic_write_bytes(self.path / IFT_CURVE_FILE, Path(src_path).read_bytes())
         return data
+
+    def set_volume_curve(self, src_path):
+        """Validate a volume-vs-time CSV (core.volume_data) and copy it into the
+        folder as the curve Bagalkot can fit instead of the logged volume
+        (the Bagalkot window's Load volume curve).  Returns the parsed curve
+        ({'t', 'volume', 'warnings'})."""
+        from core.volume_data import VolumeDataError, load_volume_curve
+        try:
+            data = load_volume_curve(src_path)
+        except VolumeDataError as e:
+            raise SessionError(f"volume curve not accepted: {e}") from None
+        _atomic_write_bytes(self.path / VOLUME_CURVE_FILE, Path(src_path).read_bytes())
+        return data
+
+    def volume_curve(self):
+        """The stored volume curve ({'t', 'volume', 'warnings'}) or None."""
+        from core.volume_data import VolumeDataError, load_volume_curve
+        p = self.volume_curve_path
+        if p is None:
+            return None
+        try:
+            return load_volume_curve(p)
+        except VolumeDataError as e:
+            raise SessionError(f"{VOLUME_CURVE_FILE} can't be read: {e}") from None
 
     def ift_curve(self):
         """The stored IFT curve ({'t', 'gamma', 'warnings'}) or None."""
@@ -716,18 +779,30 @@ class SessionFolder:
             raise SessionError(f"analyses/{name}.json is not valid JSON: {e}") from None
 
     def analysis_out_of_date(self, name):
+        return bool(self.out_of_date_reason(name))
+
+    def out_of_date_reason(self, name):
+        """Why a stored result no longer matches the session's inputs, or ''."""
         doc = self.load_analysis(name)
         if doc is None:
-            return False
+            return ''
         settings = (doc.get('data') or {}).get('settings') or {}
-        if settings.get('curve') == 'file':          # Yang on a curve from a file
-            p = self.ift_curve_path
-            return p is None or sha256_file(p) != settings.get('curve_sha256')
-        return doc.get('log_sha256') != self.session.log_sha256
+        if 'needle_id_mm' in settings and \
+                settings['needle_id_mm'] != self.session.needle.get('id_mm'):
+            return ('The needle inner diameter changed since this ran, so the model was '
+                    'built on another domain.')
+        if settings.get('curve') == 'file':          # fitted to a curve from a file
+            p = self.path / settings.get('curve_file', IFT_CURVE_FILE)
+            if not p.is_file() or sha256_file(p) != settings.get('curve_sha256'):
+                return 'The curve file changed since this ran.'
+            return ''
+        if doc.get('log_sha256') != self.session.log_sha256:
+            return 'The frame log changed since this ran (for example it was rebuilt).'
+        return ''
 
     # -- what can run --------------------------------------------------------------
     def availability(self):
-        """{analysis: (can_run, reason)} for swelling, bagalkot and yang."""
+        """{analysis: (can_run, reason)} for swelling, bagalkot, yang and simulation."""
         rows = self.log.rows
         n = len(rows)
 
@@ -742,9 +817,39 @@ class SessionFolder:
             return True, ''
 
         out = {'swelling': series('volume_uL', 'a volume'),
-               'bagalkot': series('volume_uL', 'a volume')}
+               'bagalkot': self.bagalkot_availability()}
         out['yang'] = self.yang_availability()
+        out['simulation'] = ((True, '') if self.measured_frames() else
+                             (False, "no stored frame with a successful fit for the drop geometry"))
         return out
+
+    def bagalkot_availability(self, curve=None):
+        """(can_run, reason) for Bagalkot with V(t) from ``curve``: 'log' (the
+        logged volume), 'file' (volume_curve.csv) or None (either)."""
+        why = {}
+        if curve in (None, 'log'):
+            rows = self.log.rows
+            k = (sum(1 for r in rows if r['fit_ok'] and math.isfinite(r['volume_uL']))
+                 if self.log.has('volume_uL') else 0)
+            if k >= MIN_SERIES_FRAMES:
+                return True, ''
+            what = "a single image" if len(rows) == 1 else f"{k} measured frame(s)"
+            why['log'] = (f"needs at least {MIN_SERIES_FRAMES} frames with a volume; this "
+                          f"session has {what}")
+        if curve in (None, 'file'):
+            try:
+                c = self.volume_curve()
+            except SessionError as e:
+                c, why['file'] = None, str(e)
+            if c is not None and len(c['t']) >= MIN_SERIES_FRAMES:
+                return True, ''
+            if 'file' not in why:
+                why['file'] = ("needs a volume curve file (CSV)" if c is None else
+                               f"the volume curve file has {len(c['t'])} points; the fit "
+                               f"needs at least {MIN_SERIES_FRAMES}")
+        if curve is None:
+            return False, (f"{why['log']}, or a volume curve file (CSV)")
+        return False, why[curve]
 
     def yang_availability(self, curve=None):
         """(can_run, reason) for Yang with the IFT curve from ``curve``:

@@ -9,6 +9,8 @@ need the image (crop box, scale reference, baseline row) ask the window to
 start a pick on the Frame tab.
 """
 
+from pathlib import Path
+
 from PyQt6.QtCore import Qt
 from PyQt6.QtWidgets import (QButtonGroup, QComboBox, QDoubleSpinBox, QLabel, QLineEdit,
                              QListWidget, QListWidgetItem, QPushButton, QRadioButton,
@@ -33,6 +35,20 @@ def _spin(value, lo, hi, decimals=3, step=None, suffix=''):
     if suffix:
         s.setSuffix(suffix)
     return s
+
+
+def id_spin(id_mm):
+    """Needle inner diameter in mm; 0 shows 'automatic' (70 % of the outer
+    diameter, as core.domain_builder assumes)."""
+    s = _spin(id_mm or 0.0, 0.0, 100, 4, 0.01)
+    s.setSpecialValueText('automatic (70 % of OD)')
+    s.setToolTip('Only the diffusion model (Yang, simulation) uses it: the liquid inside the '
+                 'needle is part of the model domain')
+    return s
+
+
+def id_value(spin):
+    return spin.value() or None
 
 
 def _row(*widgets, stretch=True):
@@ -127,21 +143,27 @@ class DraftPages:
         sec.form.addRow('Preset', combo_n)
         od = _spin(n['od_mm'], 0.001, 100, 4, 0.01)
         tol = _spin(100 * n.get('tol_rel', 0.01), 0, 100, 3, 0.1)
+        idd = id_spin(n.get('id_mm'))
         sec.form.addRow('Outer diameter (mm)', od)
         sec.form.addRow('Tolerance (%)', tol)
+        sec.form.addRow('Inner diameter (mm)', idd)
+        sec.widget(self._preset_buttons(
+            'needle', combo_n,
+            lambda: dict(od_mm=od.value(), id_mm=id_value(idd), od_tol_pct=tol.value())))
         lay.addWidget(sec)
 
         def set_needle(name=None):
             self._apply(lambda: d.set_needle(od.value(), tol.value() / 100.0,
-                                             name or '(custom)'))
-        od.valueChanged.connect(lambda _: set_needle())
-        tol.valueChanged.connect(lambda _: set_needle())
+                                             name or '(custom)', id_mm=id_value(idd)))
+        for w in (od, tol, idd):
+            w.valueChanged.connect(lambda _: set_needle())
 
         def pick_needle(_i):
             p = combo_n.currentData()
             if p is None:
                 return
-            for s, v in ((od, p.values['od_mm']), (tol, p.values['od_tol_pct'])):
+            for s, v in ((od, p.values['od_mm']), (tol, p.values['od_tol_pct']),
+                         (idd, p.values.get('id_mm') or 0.0)):
                 s.blockSignals(True)
                 s.setValue(float(v))
                 s.blockSignals(False)
@@ -169,6 +191,12 @@ class DraftPages:
                            ('Surrounding tolerance (%)', tout),
                            ('Pressure (MPa)', pres), ('Temperature (C)', temp)):
             sec.form.addRow(label, wdg)
+        sec.widget(self._preset_buttons(
+            'fluid', combo_f,
+            lambda: dict(rho_in=rin.value(), rho_out=rout.value(), rho_in_tol_pct=tin.value(),
+                         rho_out_tol_pct=tout.value(),
+                         P_MPa=_optional_number(pres.text(), 'Pressure'),
+                         T_C=_optional_number(temp.text(), 'Temperature'))))
         lay.addWidget(sec)
 
         def set_fluids(name=None):
@@ -199,8 +227,37 @@ class DraftPages:
             temp.setText('' if v.get('T_C') is None else f"{v['T_C']:g}")
             set_fluids(p.name)
         combo_f.currentIndexChanged.connect(pick_fluid)
-        lay.addWidget(note('Presets are managed in the Pendant window\'s Settings. The '
+        lay.addWidget(note('Presets are shared with the Pendant window\'s Settings. The '
                            'values are stored in the session when logging starts.'))
+
+    def _preset_buttons(self, kind, combo, values):
+        """Save / Save as / Delete / Import for the presets of ``kind``
+        (the Pendant window's Settings dialog)."""
+        def chosen():
+            return combo.currentData()
+
+        def save():
+            self.w.preset_save(kind, values(), chosen())
+
+        def save_as():
+            self.w.preset_save(kind, values(), None)
+
+        sv = _button('Save', 'save', save, tip='Save these values into the chosen preset '
+                                               '(not for built-in presets)')
+        sa = _button('Save as...', 'save', save_as, tip='Save these values as a new preset')
+        de = _button('Delete', 'close', lambda: self.w.preset_delete(kind, chosen()),
+                     tip='Delete the chosen preset (not for built-in presets)')
+        im = _button('Import...', 'open', self.w.preset_import,
+                     tip='Add a preset file (.json) to your presets')
+
+        def update(_=None):
+            p = chosen()
+            own = p is not None and not p.builtin
+            sv.setEnabled(own)
+            de.setEnabled(own)
+        combo.currentIndexChanged.connect(update)
+        update()
+        return _row(sv, sa, de, im)
 
     def page_calibration(self, d, lay):
         sec = Section('Calibration curve')
@@ -216,6 +273,63 @@ class DraftPages:
             row.append(_button('Remove', 'close', lambda: self._apply(
                 lambda: setattr(d, 'calibration_path', None), rebuild=True)))
         lay.addWidget(_row(*row))
+
+    # -- Yang from a single frame --------------------------------------------------------
+    def page_yang(self, d, lay):
+        """Single frame: this picture's outline is the model geometry; the
+        gamma(c) calibration and IFT(t) come from CSV files (as the Pendant
+        window's Static mode with Upload calibration and Load IFT curve)."""
+        if d.kind != 'image':
+            lay.addWidget(note('Available once the frames are logged.'))
+            return
+        from core.ift_data import IFTDataError, load_ift_curve
+        from gui.shell.analysis_pages import yang_search
+        lay.addWidget(callout(
+            'Single frame: the outline of this picture becomes the model (domain, mesh, FEM). '
+            'One picture gives one IFT value, so IFT against time for this drop comes from '
+            'a CSV, and the gamma(c) calibration from another.', 'info'))
+        missing = dict(d.missing())
+        sec = Section('Inputs')
+        pic = [k for k in ('scale', 'baseline') if k in missing]
+        sec.field('Picture', 'ready (scale and baseline set)' if not pic
+                  else f"set the {' and the '.join(pic)} first")
+        if pic:
+            sec.widget(_row(*[_button(f"Go to {k.capitalize()}", 'next',
+                                      lambda k=k: self.w.select_node(k)) for k in pic]))
+        sec.field('gamma(c) calibration', Path(d.calibration_path).name
+                  if d.calibration_path else 'not loaded')
+        sec.widget(_row(_button('Load calibration...', 'calcurve', self.w.load_calibration),
+                        _button('Download template...', 'save',
+                                lambda: self.w.save_curve_template('calibration'))))
+        if d.ift_curve_path:
+            try:
+                c = load_ift_curve(d.ift_curve_path)
+                info = (f"{Path(d.ift_curve_path).name}: {len(c['t'])} points, t = "
+                        f"{fmt(c['t'][0])} to {fmt(c['t'][-1])} s")
+            except (IFTDataError, OSError) as e:
+                info = f"can't be read: {e}"
+        else:
+            info = 'not loaded'
+        sec.field('IFT against time', info)
+        sec.widget(_row(_button('Load IFT curve (CSV)...', 'series', self.w.load_ift_curve),
+                        _button('Download template...', 'save',
+                                lambda: self.w.save_curve_template('ift'))))
+        lay.addWidget(sec)
+        search = yang_search({}, lay)
+        ready = not pic and bool(d.calibration_path and d.ift_curve_path)
+
+        def go():
+            try:
+                kw = search()
+            except ValueError as e:
+                self.w.messages.add(str(e), 'warn')
+                return
+            self.w.continue_single_frame(kw)
+        b = _button('Continue with single frame', 'compute', go, primary=True,
+                    tip='Saves the session (asks where), then builds the domain, mesh and FEM '
+                        'from this picture and fits D and k to the IFT curve')
+        b.setEnabled(ready and not self.w.job_running())
+        lay.addWidget(_row(b))
 
     # -- single-frame IFT ----------------------------------------------------------------
     def page_frame_ift(self, d, lay):
@@ -335,6 +449,7 @@ class DraftPages:
         sec = Section('Calibrate')
         method = QComboBox()
         method.addItem('Needle width: draw a box around the needle', 'needle')
+        method.addItem('Reference sphere: draw a box around it', 'sphere')
         method.addItem('Known length: click its two ends', 'points')
         method.addItem('Enter the scale', 'direct')
         method.setCurrentIndex(max(method.findData(self.w.scale_method), 0))
@@ -352,23 +467,27 @@ class DraftPages:
             self.w.scale_method = m
             sec.form.setRowVisible(size, m != 'direct')
             sec.form.setRowVisible(direct, m == 'direct')
-            go.setText({'needle': 'Draw box on needle', 'points': 'Click two points',
-                        'direct': 'Apply scale'}[m])
+            go.setText({'needle': 'Draw box on needle', 'sphere': 'Draw box on sphere',
+                        'points': 'Click two points', 'direct': 'Apply scale'}[m])
+            size.setToolTip('Real diameter of the sphere' if m == 'sphere' else
+                            'Real size of the reference; the needle diameter by default')
 
         def go_clicked():
             m = method.currentData()
             if m == 'direct':
                 self._apply(lambda: d.set_scale_direct(direct.value()), rebuild=True)
-            elif m == 'needle':
+            elif m in ('needle', 'sphere'):
+                what = 'needle width' if m == 'needle' else 'sphere diameter'
+
                 def boxed(x, y, w, h):
                     def do():
-                        px, marker = d.measure_box(x, y, w, h, 'needle')
+                        px, marker = d.measure_box(x, y, w, h, m)
                         self.w.graphics.frames.scale_marker = marker
-                        d.set_scale_from_length(px, size.value(), 'needle width',
+                        d.set_scale_from_length(px, size.value(), what,
                                                 f"{px:.1f} px = {size.value():g} mm")
                     self._apply(do, rebuild=True)
-                self.w.pick('rect', 'Drag a tight box around a straight part of the needle.',
-                            boxed)
+                self.w.pick('rect', 'Drag a tight box around a straight part of the needle.'
+                            if m == 'needle' else 'Drag a tight box around the sphere.', boxed)
             else:
                 def clicked(x1, y1, x2, y2):
                     import math
