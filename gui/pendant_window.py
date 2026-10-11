@@ -39,7 +39,8 @@ from PyQt6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QPushButton,
 from PyQt6.QtCore import Qt, QTimer, pyqtSignal, QThread, QRectF, QProcess
 from gui.window_utils import fit_to_screen, scroll_root
 from PyQt6.QtGui import (QImage, QPixmap, QPainter, QWheelEvent, QMouseEvent,
-                         QPen, QBrush, QColor, QPainterPath, QDoubleValidator)
+                         QPen, QBrush, QColor, QPainterPath, QDoubleValidator,
+                         QIntValidator)
 
 from core.image_processing import attempt_auto_baseline
 from core.pendant_calcs import extract_pendant_edges
@@ -53,6 +54,11 @@ from core.estimator import estimate_D_k_yang, EstimationCancelled
 from core.calibration import (install_calibration, clear_active_calibration,
                               CalibrationError, ACTIVE_CALIBRATION_PATH)
 from core.ift_data import load_ift_curve, IFTDataError
+from core.frame_series import (FrameSeriesCancelled,
+                               analyse_video, default_first_step,
+                               frames_for_times, sample_times,
+                               save_frame_table, table_arrays, video_info)
+from core.swelling import DEFAULT_THRESHOLD, swelling_check
 from core.camera_handler import CameraHandler
 from gui.settings_dialog import SettingsStateMixin
 from gui.threshold_dialog import ThresholdDialog
@@ -60,12 +66,15 @@ from gui.domain_window import DomainWindow
 from gui.mesh_window import MeshWindow
 from gui.fem_window import FEMWindow
 from gui.solver_window import SolverWindow
+from gui.bagalkot_window import BagalkotWindow
 from gui.styles import (DARK_STYLESHEET, BTN_PRIMARY, BTN_SUCCESS, BTN_DANGER,
                         BTN_ICON, make_cosmetic_pen, make_pixel_pen)
 
 # Downloadable blank template the user fills in and re-uploads.
 CALIB_TEMPLATE_PATH = (
     Path(__file__).resolve().parent.parent / 'data' / 'calibration_template.csv')
+IFT_TEMPLATE_PATH = (
+    Path(__file__).resolve().parent.parent / 'data' / 'ift_curve_template.csv')
 
 
 # Overlay colors
@@ -160,6 +169,39 @@ class StaticAnalysisWorker(QThread):
             if results.get('fit_success'):
                 results = compute_worthington(results, self.d_needle_m)
             self.finished_ok.emit(results)
+        except Exception as e:
+            self.failed.emit(str(e))
+
+
+class VideoAnalysisWorker(QThread):
+    """Analyses the sampled frames of a video file off the UI thread
+    (``core.frame_series.analyse_video``).  Every sampled frame is
+    analysed; none is skipped because the worker is busy."""
+
+    progress = pyqtSignal(int, int, object)      # k, n, record
+    finished_ok = pyqtSignal(object)             # list of records
+    failed = pyqtSignal(str)
+    cancelled = pyqtSignal()
+
+    def __init__(self, path, sample_t, t_start, prep_ops, params):
+        super().__init__()
+        self.path, self.sample_t, self.t_start = path, sample_t, t_start
+        self.prep_ops, self.params = list(prep_ops), dict(params)
+        self._cancel = False
+
+    def cancel(self):
+        self._cancel = True
+
+    def run(self):
+        try:
+            recs = analyse_video(
+                self.path, self.sample_t, self.t_start, self.prep_ops,
+                self.params,
+                progress_cb=lambda k, n, r: self.progress.emit(k, n, r),
+                is_cancelled=lambda: self._cancel)
+            self.finished_ok.emit(recs)
+        except FrameSeriesCancelled:
+            self.cancelled.emit()
         except Exception as e:
             self.failed.emit(str(e))
 
@@ -435,6 +477,16 @@ class PendantWindow(SettingsStateMixin, QWidget):
         self.time_data, self.ift_data, self.ift_err, self.qc_flags = [], [], [], []
         self.last_grab_time = -999.0
         self.ts_start_wall_time = 0
+        # Video time series: preparation applied to every sampled frame
+        # (crop / threshold, in the order the user made them), the video,
+        # the per-frame records and the swelling verdict.
+        self.prep_ops = []
+        self.video_path = None
+        self.video_meta = None
+        self.frame_records = []
+        self.vid_worker = None
+        self.swelling = None
+        self.bagalkot_window = None
 
         # --- root layout ----------------------------------------------
         main_layout = scroll_root(self, QHBoxLayout)
@@ -565,6 +617,64 @@ class PendantWindow(SettingsStateMixin, QWidget):
         h_analyze_btns.addWidget(self.btn_analyze_time)
         l_analyze.addLayout(h_analyze_btns)
 
+        # Video sampling (time-series mode with a video file): which frames
+        # to analyse.  Only those frames are decoded.
+        self.video_box = QWidget()
+        vb = QVBoxLayout(self.video_box)
+        vb.setContentsMargins(0, 2, 0, 2)
+        vf = QFormLayout()
+        vf.setContentsMargins(0, 0, 0, 0)
+        self.combo_sampling = QComboBox()
+        self.combo_sampling.addItems(["Dense early", "Every N seconds"])
+        self.combo_sampling.setToolTip(
+            "Dense early: more frames at the start, where IFT and volume "
+            "change fastest. Every N seconds: evenly spaced frames.")
+        fvv = QDoubleValidator(0.0, 1e7, 4)
+        self.in_vid_start = QLineEdit("0")
+        self.in_vid_start.setValidator(fvv)
+        self.in_vid_start.setToolTip(
+            "Video time (s) at which the drop is formed: t = 0 of the "
+            "analysis. Earlier frames are ignored.")
+        self.in_vid_end = QLineEdit("")
+        self.in_vid_end.setValidator(fvv)
+        self.in_vid_end.setToolTip("Video time (s) of the last frame to analyse.")
+        self.in_vid_frames = QLineEdit("120")
+        self.in_vid_frames.setValidator(QIntValidator(3, 5000))
+        self.in_vid_first = QLineEdit("")
+        self.in_vid_first.setValidator(fvv)
+        self.in_vid_first.setToolTip(
+            "First step after t = 0 (s); later steps grow geometrically. "
+            "Blank = 0.1 % of the analysed span.")
+        self.in_vid_interval = QLineEdit("5")
+        self.in_vid_interval.setValidator(fvv)
+        vf.addRow("Sampling:", self.combo_sampling)
+        vf.addRow("Drop formed at (s):", self.in_vid_start)
+        vf.addRow("Analyse until (s):", self.in_vid_end)
+        vf.addRow("Frames:", self.in_vid_frames)
+        vf.addRow("First step (s):", self.in_vid_first)
+        vf.addRow("Interval N (s):", self.in_vid_interval)
+        self._vid_form = vf
+        vb.addLayout(vf)
+        self.lbl_vid_plan = QLabel("")
+        self.lbl_vid_plan.setWordWrap(True)
+        self.lbl_vid_plan.setStyleSheet("color:#9aa3b8;")
+        vb.addWidget(self.lbl_vid_plan)
+        self.vid_progress = QProgressBar()
+        self.vid_progress.setVisible(False)
+        vb.addWidget(self.vid_progress)
+        self.video_box.setVisible(False)
+        l_analyze.addWidget(self.video_box)
+        # Shown in time-series mode until a video is loaded, so the user
+        # knows where the sampling options come from.
+        self.lbl_vid_hint = QLabel(
+            "Video: upload one (Source input) to choose the sampling "
+            "(dense early or every N seconds) and analyse it here. "
+            "Live camera: Start time series measures frames as they arrive.")
+        self.lbl_vid_hint.setWordWrap(True)
+        self.lbl_vid_hint.setStyleSheet("color:#9aa3b8;")
+        self.lbl_vid_hint.setVisible(False)
+        l_analyze.addWidget(self.lbl_vid_hint)
+
         # Results card
         self.results_card = QFrame(objectName="card")
         rc = QVBoxLayout(self.results_card)
@@ -599,6 +709,45 @@ class PendantWindow(SettingsStateMixin, QWidget):
         self.box_analyze.setLayout(l_analyze)
         self.box_analyze.setEnabled(False)
         right_panel.addWidget(self.box_analyze)
+
+        # Swelling check and method choice (time-series mode): after the
+        # frames are analysed, decide whether the starting picture is a
+        # valid domain (Yang) or the volume method is needed (Bagalkot).
+        self.box_swell = QGroupBox("Swelling check and method")
+        ls = QVBoxLayout(self.box_swell)
+        thr_form = QFormLayout()
+        thr_form.setContentsMargins(0, 0, 0, 0)
+        self.in_swell_thr = QLineEdit(f"{100 * DEFAULT_THRESHOLD:g}")
+        self.in_swell_thr.setValidator(QDoubleValidator(0.0, 1000.0, 3))
+        self.in_swell_thr.setToolTip(
+            "Swelling (V_end / V0 - 1) above which the drop is treated as "
+            "swelling significantly. Bagalkot's Table 4.3: ignoring 3 % "
+            "swelling changes D by about 2 %, 15 % swelling by about 15 %.")
+        thr_form.addRow("Swelling threshold (%):", self.in_swell_thr)
+        ls.addLayout(thr_form)
+        self.lbl_swell = QLabel("Analyse a video to check the swelling. "
+                                "The volume method can also be run on a "
+                                "volume CSV.")
+        self.lbl_swell.setWordWrap(True)
+        self.lbl_swell.setStyleSheet("color:#9aa3b8;")
+        ls.addWidget(self.lbl_swell)
+        route = QHBoxLayout()
+        self.btn_route_yang = QPushButton("Continue with Yang")
+        self.btn_route_yang.setToolTip(
+            "Static picture: the first frame becomes the Step 1 image and "
+            "the IFT curve goes to Step 8 (D and k).")
+        self.btn_route_bagalkot = QPushButton("Continue with Bagalkot")
+        self.btn_route_bagalkot.setToolTip(
+            "Volume method: fit D to the drop volume V(t) (Bagalkot 2019).")
+        self.btn_route_yang.setEnabled(False)
+        route.addWidget(self.btn_route_yang)
+        route.addWidget(self.btn_route_bagalkot)
+        ls.addLayout(route)
+        self.btn_export_frames = QPushButton("Export frames (CSV)...")
+        self.btn_export_frames.setEnabled(False)
+        ls.addWidget(self.btn_export_frames)
+        self.box_swell.setVisible(False)
+        right_panel.addWidget(self.box_swell)
 
         # Step 4 · Domain
         self.box_domain = QGroupBox("Step 4 · Domain")
@@ -783,6 +932,10 @@ class PendantWindow(SettingsStateMixin, QWidget):
             "Two columns: time (s), IFT (mN/m). Optional header row and "
             "'#' comment lines. Replaces the Step-3 time series as the "
             "data the fit uses.")
+        self.btn_ift_template = QPushButton("Download template")
+        self.btn_ift_template.setToolTip(
+            "Save an example IFT-curve CSV with instructions, to fill in "
+            "and load.")
         self.btn_estimate = QPushButton("Fit D, k to measured IFT")
         self.btn_estimate.setStyleSheet(BTN_PRIMARY)
         self.lbl_est_status = QLabel(
@@ -790,7 +943,10 @@ class PendantWindow(SettingsStateMixin, QWidget):
             "or Load IFT curve (CSV).")
         self.lbl_est_status.setWordWrap(True)
         self.lbl_est_status.setStyleSheet("color:#9aa3b8;")
-        l_est.addWidget(self.btn_load_ift)
+        ift_row = QHBoxLayout()
+        ift_row.addWidget(self.btn_ift_template)
+        ift_row.addWidget(self.btn_load_ift, 1)
+        l_est.addLayout(ift_row)
         l_est.addWidget(self.btn_estimate)
         l_est.addWidget(self.lbl_est_status)
 
@@ -841,6 +997,22 @@ class PendantWindow(SettingsStateMixin, QWidget):
         self.graph_widget.addItem(self.err_item)
         self.graph_widget.setMinimumHeight(220)
         right_panel.addWidget(self.graph_widget)
+
+        # Relative drop volume of the analysed video frames
+        self.vol_widget = pg.PlotWidget(title="Drop volume V / V0 vs time")
+        self.vol_widget.setLabel('left', 'V / V0')
+        self.vol_widget.setLabel('bottom', 'Time (s)')
+        self.vol_widget.showGrid(x=True, y=True, alpha=0.25)
+        self.vol_pts = pg.ScatterPlotItem(
+            size=6, pen=pg.mkPen(None), brush=pg.mkBrush('#8ab4ff'))
+        self.vol_widget.addItem(self.vol_pts)
+        self.vol_thr_line = pg.InfiniteLine(
+            angle=0, pen=pg.mkPen('#ff9f5a', width=1, style=Qt.PenStyle.DashLine))
+        self.vol_thr_line.setVisible(False)
+        self.vol_widget.addItem(self.vol_thr_line)
+        self.vol_widget.setMinimumHeight(200)
+        self.vol_widget.setVisible(False)
+        right_panel.addWidget(self.vol_widget)
         right_panel.addStretch(1)
 
         # wiring
@@ -867,12 +1039,21 @@ class PendantWindow(SettingsStateMixin, QWidget):
         self.btn_run_sim.clicked.connect(self.run_simulation)
         self.btn_estimate.clicked.connect(self.run_estimation)
         self.btn_load_ift.clicked.connect(lambda: self.load_ift_csv())
+        self.btn_ift_template.clicked.connect(self.download_ift_template)
         self.btn_calib_download.clicked.connect(self.download_calib_template)
         self.btn_calib_upload.clicked.connect(self.upload_calibration)
         self.btn_calib_clear.clicked.connect(self.reset_calibration)
         self.btn_calib_help.toggled.connect(self.lbl_calib_help.setVisible)
         self.btn_restart.clicked.connect(self.restart_application)
         self.radio_range_manual.toggled.connect(self.manual_range_box.setVisible)
+        self.combo_sampling.currentIndexChanged.connect(self._update_sampling_ui)
+        for w in (self.in_vid_start, self.in_vid_end, self.in_vid_frames,
+                  self.in_vid_first, self.in_vid_interval):
+            w.editingFinished.connect(self._update_sampling_ui)
+        self.in_swell_thr.editingFinished.connect(self._run_swelling_check)
+        self.btn_route_yang.clicked.connect(self.continue_with_yang)
+        self.btn_route_bagalkot.clicked.connect(self.continue_with_bagalkot)
+        self.btn_export_frames.clicked.connect(self.export_frames)
 
         self.switch_mode()
 
@@ -982,12 +1163,20 @@ class PendantWindow(SettingsStateMixin, QWidget):
             self.btn_analyze_static.show()
             self.btn_analyze_time.hide()
             self.graph_widget.hide()
+            self.vol_widget.hide()
+            self.box_swell.hide()
+            self.video_box.hide()
+            self.lbl_vid_hint.hide()
         else:
             self.btn_upload_img.hide()
             self.btn_upload_vid.show()
             self.btn_analyze_static.hide()
             self.btn_analyze_time.show()
             self.graph_widget.show()
+            self.vol_widget.setVisible(self.video_path is not None)
+            self.box_swell.show()
+            self.video_box.setVisible(self.video_path is not None)
+            self.lbl_vid_hint.setVisible(self.video_path is None)
 
     def open_settings(self):
         self.open_settings_dialog(DARK_STYLESHEET)
@@ -1012,6 +1201,8 @@ class PendantWindow(SettingsStateMixin, QWidget):
                 x1, x2 = max(0, x), min(W, x + w)
                 cropped = self.current_raw_image[y1:y2, x1:x2]
                 self.setup_image_for_analysis(cropped)
+                # applied to every analysed video frame as well
+                self.prep_ops.append(('crop', (x1, y1, x2 - x1, y2 - y1)))
         self.btn_apply_crop.hide()
         self.btn_crop.show()
         self.image_label.set_mode('idle')
@@ -1022,6 +1213,7 @@ class PendantWindow(SettingsStateMixin, QWidget):
             dialog.setStyleSheet(DARK_STYLESHEET)
             if dialog.exec():
                 self.setup_image_for_analysis(dialog.get_processed_image())
+                self.prep_ops.append(('threshold', dialog.current_threshold))
 
     # --- calibration ---------------------------------------------------
     def update_calib_buttons(self, text):
@@ -1145,6 +1337,7 @@ class PendantWindow(SettingsStateMixin, QWidget):
         if fp:
             img = cv2.imread(fp, cv2.IMREAD_COLOR)
             if img is not None:
+                self._reset_video_state()
                 self.setup_image_for_analysis(img)
 
     def upload_video(self):
@@ -1153,18 +1346,35 @@ class PendantWindow(SettingsStateMixin, QWidget):
         fp, _ = QFileDialog.getOpenFileName(
             self, "Open Video", "", "Video Files (*.mp4 *.avi *.mkv *.mov)")
         if fp:
-            self.capture = cv2.VideoCapture(fp)
-            ret, frame = self.capture.read()
+            try:
+                meta = video_info(fp)
+            except IOError as e:
+                QMessageBox.critical(self, "Cannot open video", str(e))
+                return
+            cap = cv2.VideoCapture(fp)
+            ret, frame = cap.read()
+            cap.release()
             if ret:
+                self._reset_video_state()
+                self.video_path, self.video_meta = fp, meta
                 self.setup_image_for_analysis(frame)
+                self.in_vid_end.setText(f"{meta['duration']:.2f}")
+                self.btn_analyze_time.setText("Analyse video")
+                self.video_box.setVisible(True)
+                self.lbl_vid_hint.setVisible(False)
+                self.vol_widget.setVisible(True)
+                self._update_sampling_ui()
                 QMessageBox.information(
                     self, "Video loaded",
-                    "Video paused on first frame.\n"
-                    "Complete calibration and baseline, then press "
-                    "'Start time series' to play.")
+                    f"{meta['n_frames']} frames at {meta['fps']:.3g} fps "
+                    f"({meta['duration']:.1f} s). Showing the first frame.\n\n"
+                    "Set crop and threshold, calibration and baseline on it; "
+                    "they are applied to every analysed frame. Then choose "
+                    "the sampling and press 'Analyse video'.")
 
     def start_camera(self):
         self.is_video_file = False
+        self._reset_video_state()
         try:
             self.live_camera.start()
             if self.radio_static.isChecked():
@@ -1403,6 +1613,9 @@ class PendantWindow(SettingsStateMixin, QWidget):
             QMessageBox.critical(self, "Error", str(e))
 
     def toggle_time_series(self):
+        if self.video_path is not None and self.is_video_file:
+            self._toggle_video_analysis()
+            return
         if self.worker is None or not self.worker.running:
             if self.capture is None and self.live_camera.camera_type == "Unknown":
                 QMessageBox.warning(self, "Warning",
@@ -1461,6 +1674,347 @@ class PendantWindow(SettingsStateMixin, QWidget):
 
         self._populate_results_card(results)
         self._draw_pendant_overlays(results)
+
+    # =========================================================================
+    # Video time series: sampled analysis, swelling check, method choice
+    # =========================================================================
+    def _reset_video_state(self):
+        """A new source invalidates the video, its preparation and results."""
+        if self.vid_worker is not None and self.vid_worker.isRunning():
+            self.vid_worker.cancel()
+            self.vid_worker.wait()
+        self.prep_ops = []
+        self.video_path = None
+        self.video_meta = None
+        self.frame_records = []
+        self.swelling = None
+        self.btn_analyze_time.setText("Start time series")
+        self.video_box.setVisible(False)
+        self.lbl_vid_hint.setVisible(self.radio_ts.isChecked())
+        self.vol_widget.setVisible(False)
+        self.vol_pts.setData([], [])
+        self.vol_thr_line.setVisible(False)
+        self.btn_route_yang.setEnabled(False)
+        self.btn_export_frames.setEnabled(False)
+        self.lbl_swell.setText("Analyse a video to check the swelling. The "
+                               "volume method can also be run on a volume CSV.")
+        self.lbl_swell.setStyleSheet("color:#9aa3b8;")
+
+    def _sampling_request(self):
+        """(sample times after t_start, t_start) from the sampling fields;
+        raises ValueError with a message for the user."""
+        meta = self.video_meta
+        if meta is None:
+            raise ValueError("load a video first")
+
+        def num(w, name):
+            txt = w.text().strip()
+            try:
+                return float(txt)
+            except ValueError:
+                raise ValueError(f"{name}: '{txt}' is not a number") from None
+        t0 = num(self.in_vid_start, "Drop formed at")
+        t1 = num(self.in_vid_end, "Analyse until") if self.in_vid_end.text().strip() \
+            else meta['duration']
+        t1 = min(t1, meta['duration'])
+        if not 0 <= t0 < t1:
+            raise ValueError("'Drop formed at' must be before 'Analyse until' "
+                             "and inside the video")
+        span = t1 - t0
+        if self.combo_sampling.currentIndex() == 0:
+            n = int(num(self.in_vid_frames, "Frames"))
+            first = self.in_vid_first.text().strip()
+            dt1 = float(first) if first else default_first_step(span, meta['fps'])
+            times = sample_times(span, 'dense_early', n_frames=n, first_step=dt1)
+        else:
+            times = sample_times(span, 'interval',
+                                 interval=num(self.in_vid_interval, "Interval N"))
+        return times, t0
+
+    def _update_sampling_ui(self):
+        dense = self.combo_sampling.currentIndex() == 0
+        self._vid_form.setRowVisible(self.in_vid_frames, dense)
+        self._vid_form.setRowVisible(self.in_vid_first, dense)
+        self._vid_form.setRowVisible(self.in_vid_interval, not dense)
+        if self.video_meta is None:
+            self.lbl_vid_plan.setText("")
+            return
+        try:
+            times, t0 = self._sampling_request()
+        except ValueError as e:
+            self.lbl_vid_plan.setText(f"Check the sampling: {e}")
+            self.lbl_vid_plan.setStyleSheet("color:#ff9f5a;")
+            return
+        m = self.video_meta
+        idx, t_act = frames_for_times(times, m['fps'], t0, m['n_frames'])
+        n = len(idx)
+        gaps = np.diff(t_act)
+        self.lbl_vid_plan.setText(
+            f"{n} of {m['n_frames']} frames will be analysed "
+            f"(t = 0 to {t_act[-1]:.1f} s; steps {gaps.min():.3g} to "
+            f"{gaps.max():.3g} s). About {max(1, round(n * 1.5 / 60))} min "
+            f"at ~1.5 s per frame; runs in the background.")
+        self.lbl_vid_plan.setStyleSheet("color:#9aa3b8;")
+
+    def _toggle_video_analysis(self):
+        if self.vid_worker is not None and self.vid_worker.isRunning():
+            self.vid_worker.cancel()
+            self.btn_analyze_time.setEnabled(False)
+            self.btn_analyze_time.setText("Cancelling...")
+            return
+        if self.pixel_to_m is None or self.baseline_y is None:
+            QMessageBox.warning(self, "Not ready",
+                                "Complete Step 1 (calibration) and Step 2 "
+                                "(baseline) on the first frame first.")
+            return
+        try:
+            times, t0 = self._sampling_request()
+        except ValueError as e:
+            QMessageBox.warning(self, "Check the sampling", str(e))
+            return
+        if self.frame_records:
+            reply = QMessageBox.question(
+                self, "Analyse again?",
+                f"Replace the {len(self.frame_records)} analysed frames?")
+            if reply != QMessageBox.StandardButton.Yes:
+                return
+        params = dict(baseline_y=self.baseline_y, pixel_to_m=self.pixel_to_m,
+                      density_inner=self.density_inner,
+                      density_outer=self.density_outer,
+                      needle_tol_rel=self.needle_tol_rel,
+                      rho_in_tol_rel=self.rho_in_tol_rel,
+                      rho_out_tol_rel=self.rho_out_tol_rel,
+                      needle_diameter_m=self.needle_mm / 1000.0)
+        self.frame_records = []
+        self.swelling = None
+        self.time_data, self.ift_data, self.ift_err, self.qc_flags = [], [], [], []
+        self._vol_t, self._vol_v = [], []
+        self.plot_line.setData([], [])
+        self.plot_pts_pass.setData([], [])
+        self.plot_pts_fail.setData([], [])
+        self.plot_fit_line.setData([], [])
+        self.err_item.setData(x=np.array([]), y=np.array([]),
+                              top=np.array([]), bottom=np.array([]))
+        self.vol_pts.setData([], [])
+        self.vol_thr_line.setVisible(False)
+        self.btn_route_yang.setEnabled(False)
+        self.btn_export_frames.setEnabled(False)
+
+        self.vid_worker = VideoAnalysisWorker(self.video_path, times, t0,
+                                              self.prep_ops, params)
+        self.vid_worker.progress.connect(self._on_vid_progress)
+        self.vid_worker.finished_ok.connect(self._on_vid_done)
+        self.vid_worker.failed.connect(self._on_vid_failed)
+        self.vid_worker.cancelled.connect(self._on_vid_cancelled)
+        self.vid_worker.finished.connect(self._on_vid_finished)
+        self._vid_t_wall = time.time()
+        self._set_video_inputs_enabled(False)
+        self.vid_progress.setValue(0)
+        self.vid_progress.setVisible(True)
+        self.btn_analyze_time.setText("Cancel analysis")
+        self.btn_analyze_time.setStyleSheet(BTN_DANGER)
+        self.lbl_swell.setText("Analysing frames...")
+        self.lbl_swell.setStyleSheet("color:#8ab4ff;")
+        self.vid_worker.start()
+
+    def _set_video_inputs_enabled(self, on):
+        for w in (self.box_calib, self.box_base, self.btn_upload_vid,
+                  self.btn_crop, self.btn_thresh, self.combo_sampling,
+                  self.in_vid_start, self.in_vid_end, self.in_vid_frames,
+                  self.in_vid_first, self.in_vid_interval,
+                  self.btn_route_bagalkot, self.radio_static):
+            w.setEnabled(on)
+
+    def _on_vid_progress(self, k, n, rec):
+        self.vid_progress.setRange(0, n)
+        self.vid_progress.setValue(k)
+        el = time.time() - self._vid_t_wall
+        left = el / k * (n - k)
+        self.lbl_vid_plan.setText(f"Frame {k} of {n}; about "
+                                  f"{left / 60:.1f} min left.")
+        if np.isfinite(rec['volume_uL']):
+            self._vol_t.append(rec['t_s'])
+            self._vol_v.append(rec['volume_uL'])
+            v = np.asarray(self._vol_v)
+            self.vol_pts.setData(self._vol_t, v / v[0])
+        if rec['fit_ok']:
+            self.time_data.append(rec['t_s'])
+            self.ift_data.append(rec['ift_mNm'])
+            self.ift_err.append(rec['ift_unc_mNm'])
+            self.qc_flags.append(rec['qc_pass'])
+            x, y = np.array(self.time_data), np.array(self.ift_data)
+            flags = np.array(self.qc_flags, dtype=bool)
+            self.plot_line.setData(x, y)
+            self.plot_pts_pass.setData(x[flags], y[flags])
+            self.plot_pts_fail.setData(x[~flags], y[~flags])
+            e = np.nan_to_num(np.array(self.ift_err))
+            self.err_item.setData(x=x, y=y, top=e, bottom=e)
+            self._populate_results_card(rec['results'])
+
+    def _on_vid_done(self, records):
+        self.frame_records = records
+        n_ok = sum(r['fit_ok'] for r in records)
+        n_qc = sum(r['qc_pass'] for r in records)
+        self.lbl_vid_plan.setText(
+            f"Analysed {len(records)} frames in "
+            f"{(time.time() - self._vid_t_wall) / 60:.1f} min: {n_ok} fitted, "
+            f"{n_qc} passed QC.")
+        self.lbl_vid_plan.setStyleSheet("color:#4fd07b; font-weight:600;")
+        self.btn_export_frames.setEnabled(bool(records))
+        self.btn_route_yang.setEnabled(n_ok > 0)
+        self._run_swelling_check()
+
+    def _on_vid_failed(self, msg):
+        self.lbl_swell.setText(f"Video analysis failed: {msg}")
+        self.lbl_swell.setStyleSheet("color:#ff6a4d;")
+        QMessageBox.critical(self, "Video analysis failed", msg)
+
+    def _on_vid_cancelled(self):
+        self.lbl_swell.setText("Analysis cancelled. The frames shown are "
+                               "incomplete and are not used.")
+        self.lbl_swell.setStyleSheet("color:#ff9f5a;")
+        self.lbl_vid_plan.setText("")
+
+    def _on_vid_finished(self):
+        self.vid_progress.setVisible(False)
+        self._set_video_inputs_enabled(True)
+        self.btn_analyze_time.setEnabled(True)
+        self.btn_analyze_time.setText("Analyse video")
+        self.btn_analyze_time.setStyleSheet(BTN_SUCCESS)
+
+    def _swelling_threshold(self):
+        try:
+            thr = float(self.in_swell_thr.text()) / 100.0
+        except ValueError:
+            thr = DEFAULT_THRESHOLD
+        return thr if thr > 0 else DEFAULT_THRESHOLD
+
+    def _run_swelling_check(self):
+        """Swelling verdict for the analysed frames (re-run when the
+        threshold changes)."""
+        if not self.frame_records:
+            return
+        a = table_arrays(self.frame_records)
+        thr = self._swelling_threshold()
+        sw = swelling_check(a['t'], a['volume'], threshold=thr)
+        self.swelling = sw
+        lines = [sw['message']]
+        if np.isfinite(sw['S']):
+            lines.append(f"V0 = {sw['V0']:.4g} µL, V_end = {sw['V_end']:.4g} µL, "
+                         f"{sw['n_valid']} frames with a volume.")
+        self.lbl_swell.setText("\n".join(lines))
+        colour = {'significant': '#ffd166', 'negligible': '#4fd07b',
+                  'not_measurable': '#4fd07b'}.get(sw['verdict'], '#ff9f5a')
+        self.lbl_swell.setStyleSheet(f"color:{colour}; font-weight:600;")
+        self.btn_route_yang.setStyleSheet(
+            BTN_PRIMARY if sw['recommend'] == 'yang' else "")
+        self.btn_route_bagalkot.setStyleSheet(
+            BTN_PRIMARY if sw['recommend'] == 'bagalkot' else "")
+        self.vol_thr_line.setValue(1.0 + thr)
+        self.vol_thr_line.setVisible(True)
+
+    def continue_with_yang(self):
+        """Static picture route: the first measured frame becomes the Step 1
+        image (domain) and the measured IFT(t) becomes Step 8's curve."""
+        ok = [r for r in self.frame_records if r['fit_ok']]
+        if not ok:
+            return
+        sw = self.swelling or {}
+        if sw.get('verdict') == 'significant':
+            reply = QMessageBox.question(
+                self, "Drop swells significantly",
+                f"{sw['message']}\n\nYang's method treats the drop as "
+                f"static. Continue with Yang anyway?")
+            if reply != QMessageBox.StandardButton.Yes:
+                return
+        first = ok[0]
+        img = first.get('image')
+        if img is None:
+            QMessageBox.critical(self, "No image", "The first measured frame's "
+                                 "image was not kept; analyse the video again.")
+            return
+        self.current_raw_image = img
+        self.image_label.set_image(img, auto_fit=True)
+        self.edges_df = first['edges']
+        self.last_results = first['results']
+        self.display_image(img)
+        self._paint_baseline(self.baseline_y)
+        self._draw_pendant_overlays(first['results'])
+        self._populate_results_card(first['results'])
+
+        self.time_data = [r['t_s'] for r in ok]
+        self.ift_data = [r['ift_mNm'] for r in ok]
+        self.ift_err = [r['ift_unc_mNm'] for r in ok]
+        self.qc_flags = [r['qc_pass'] for r in ok]
+        x, y = np.array(self.time_data), np.array(self.ift_data)
+        flags = np.array(self.qc_flags, dtype=bool)
+        self.plot_line.setData(x, y)
+        self.plot_pts_pass.setData(x[flags], y[flags])
+        self.plot_pts_fail.setData(x[~flags], y[~flags])
+
+        skipped = "" if first is self.frame_records[0] else (
+            f" The first frame(s) could not be fitted, so the domain is the "
+            f"frame at t = {first['t_s']:.2f} s.")
+        self.box_domain.setEnabled(True)
+        self.lbl_domain_status.setText(
+            f"Yang route: the frame at t = {first['t_s']:.2f} s is the domain; "
+            f"{len(ok)} IFT points ({int(flags.sum())} passed QC) are Step 8's "
+            f"curve. Continue with Build Domain.{skipped}")
+        self.lbl_domain_status.setStyleSheet("color:#4fd07b; font-weight:600;")
+        self.lbl_est_status.setText(
+            f"IFT curve from the video: {len(ok)} points, "
+            f"{int(flags.sum())} QC-passed (t = {x[0]:g}–{x[-1]:g} s).")
+        self.lbl_est_status.setStyleSheet("color:#4fd07b; font-weight:600;")
+
+    def continue_with_bagalkot(self):
+        """Volume route: open the Bagalkot window with V(t) of the analysed
+        frames (or empty, to load a volume CSV)."""
+        t = V = None
+        source = ""
+        sw = self.swelling
+        if self.frame_records:
+            a = table_arrays(self.frame_records)
+            keep = np.isfinite(a['volume'])
+            t, V = a['t'][keep], a['volume'][keep]
+            source = Path(self.video_path).name if self.video_path else "video"
+            if sw is not None and sw['verdict'] in ('negligible', 'not_measurable'):
+                reply = QMessageBox.question(
+                    self, "Little swelling",
+                    f"{sw['message']}\n\nThe volume method needs a clear "
+                    f"volume signal. Continue with Bagalkot anyway?")
+                if reply != QMessageBox.StandardButton.Yes:
+                    return
+        if self.bagalkot_window is not None:
+            self.bagalkot_window.close()
+        self.bagalkot_window = BagalkotWindow(t, V, source, sw)
+        self.bagalkot_window.show()
+
+    def export_frames(self):
+        if not self.frame_records:
+            return
+        stem = Path(self.video_path).stem if self.video_path else "frames"
+        dest, _ = QFileDialog.getSaveFileName(
+            self, "Export analysed frames", f"{stem}_frames.csv",
+            "CSV files (*.csv)")
+        if not dest:
+            return
+        m = self.video_meta or {}
+        header = [f"video: {Path(self.video_path).name if self.video_path else ''}",
+                  f"fps: {m.get('fps', '')}; drop formed at {self.in_vid_start.text()} s "
+                  f"(time_s is measured from there)",
+                  f"sampling: {self.combo_sampling.currentText()}",
+                  f"scale: {self.pixel_to_m * 1e3:.6g} mm/px; baseline y = "
+                  f"{self.baseline_y}; preparation: {self.prep_ops}",
+                  f"densities (kg/m3): drop {self.density_inner:g}, "
+                  f"surrounding {self.density_outer:g}"]
+        if self.swelling is not None:
+            header.append(f"swelling check: {self.swelling['message']}")
+        try:
+            save_frame_table(dest, self.frame_records, header)
+        except OSError as e:
+            QMessageBox.critical(self, "Could not export", str(e))
+            return
+        self.lbl_vid_plan.setText(f"Frames exported to {dest}.")
 
     # =========================================================================
     # Results card plumbing
@@ -1879,6 +2433,23 @@ class PendantWindow(SettingsStateMixin, QWidget):
     # Minimum number of usable (QC-passed) points the fit needs.
     MIN_FIT_POINTS = 10
 
+    def download_ift_template(self):
+        """Save the IFT-curve template (instructions + example rows)."""
+        dest, _ = QFileDialog.getSaveFileName(
+            self, "Save IFT curve template",
+            "ift_curve_template.csv", "CSV files (*.csv)")
+        if not dest:
+            return
+        try:
+            shutil.copyfile(IFT_TEMPLATE_PATH, dest)
+        except OSError as e:
+            QMessageBox.critical(self, "Could not save template", str(e))
+            return
+        self.lbl_est_status.setText(
+            f"Template saved to {dest}. Replace the example rows with your "
+            f"own data, then Load IFT curve (CSV).")
+        self.lbl_est_status.setStyleSheet("color:#8ab4ff;")
+
     def load_ift_csv(self, path=None):
         """Use an IFT-vs-time curve from a CSV file as Step 8's fit data.
 
@@ -2106,6 +2677,11 @@ class PendantWindow(SettingsStateMixin, QWidget):
         self._reset_est_ui()
 
     def closeEvent(self, event):
+        if self.vid_worker is not None and self.vid_worker.isRunning():
+            self.vid_worker.cancel()
+            self.vid_worker.wait()
+        if self.bagalkot_window is not None:
+            self.bagalkot_window.close()
         self.stop_camera()
         if self.worker is not None:
             self.worker.stop()

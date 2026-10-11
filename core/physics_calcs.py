@@ -229,7 +229,15 @@ def calculate_physics(edges_df, baseline_y, pixel_to_m,
                       qc_rmse_max_px=1.5,
                       qc_beta_range=(0.05, 1.50),
                       qc_asym_trans_px=1.0,
-                      qc_asym_tilt=0.005):
+                      qc_asym_tilt=0.005,
+                      warm_start=None):
+    """Fit one pendant-drop contour below ``baseline_y``.
+
+    ``warm_start``: optional dict with the previous frame's fitted
+    ``beta`` and ``R0_px`` (video analysis), used as the starting point of
+    the shape fit instead of the default guess; the result is the same
+    minimum, reached in fewer iterations.
+    """
     sub = edges_df[edges_df['y'] >= baseline_y].reset_index(drop=True)
     if len(sub) < 30:
         return dict(fit_success=False,
@@ -253,7 +261,7 @@ def calculate_physics(edges_df, baseline_y, pixel_to_m,
     try:
         (cx0, cy0), R0_px_init = fit_apex_circle(ys, lxs, rxs)
     except Exception as e:
-        return dict(fit_success=False, error=f"Apex circle fit failed: {e}")
+        return dict(fit_success=False, error=f"Apex circle fit failed: {e}", volume_ul=V_uL)
     y_apex0 = float(ys.max())
     x_axis0 = pre_asym['x_axis']
 
@@ -268,15 +276,21 @@ def calculate_physics(edges_df, baseline_y, pixel_to_m,
     y_exp = np.concatenate([ys_f, ys_f])
 
     try:
+        if warm_start:
+            R0_guess = float(warm_start.get('R0_px', R0_px_init))
+            beta_guess = float(warm_start.get('beta', 0.2))
+        else:
+            R0_guess, beta_guess = R0_px_init, 0.2
         fit = fit_profile_simultaneous(x_exp, y_exp,
-                                       x_axis0, y_apex0, R0_px_init,
-                                       beta0=0.2)
+                                       x_axis0, y_apex0, R0_guess,
+                                       beta0=beta_guess)
     except Exception as e:
-        return dict(fit_success=False, error=f"Profile fit failed: {e}")
+        return dict(fit_success=False, error=f"Profile fit failed: {e}", volume_ul=V_uL)
 
     if not fit['result'].success and fit['result'].status <= 0:
         return dict(fit_success=False,
-                    error=f"Fit did not converge (status={fit['result'].status})")
+                    error=f"Fit did not converge (status={fit['result'].status})",
+                    volume_ul=V_uL)
 
     R0_px_fit = fit['R0_px']
     R0_m_fit  = R0_px_fit * pixel_to_m

@@ -99,6 +99,12 @@ def main():
         check("N/m values: unit warning", d is not None
               and any('N/m' in w for w in d['warnings']))
 
+        print("── downloadable template ──")
+        tpl = Path(__file__).resolve().parent.parent / "data" / "ift_curve_template.csv"
+        d = load_ift_curve(tpl)
+        check("template loads as-is with no warnings, enough points for a fit",
+              len(d['t']) >= 10 and not d['warnings'])
+
         print("── rejections ──")
         expect_reject("NaN IFT", write(tmp, "10,nan\n20,59\n", "r1.csv"), "NaN")
         expect_reject("Inf time", write(tmp, "inf,60\n20,59\n", "r2.csv"))

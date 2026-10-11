@@ -39,3 +39,6 @@ Thumbs.db
 dist/
 build/
 *.egg-info/
+
+# Calibration installed by the user at runtime (Upload calibration)
+/data/active_calibration.csv
