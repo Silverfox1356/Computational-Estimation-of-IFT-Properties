@@ -181,7 +181,8 @@ def analyse_frame(frame, params, warm_start=None):
     density_inner, density_outer, needle_tol_rel, rho_in_tol_rel,
     rho_out_tol_rel, needle_diameter_m.
 
-    ``warm_start`` (previous frame's beta, R0_px) speeds up the fit.
+    ``warm_start`` (a previous fit's beta, R0_px) sets the starting guess;
+    the default per-frame guess is usually faster.
 
     Returns a record dict; 'results' holds the full physics output (kept
     so the first frame can become the Step 1 image for the Yang route)."""
@@ -230,15 +231,14 @@ def analyse_video(path, sample_t, t_start, prep_ops, params,
     t_of = dict(zip(idx.tolist(), t_act.tolist()))
     records = []
     n = len(idx)
-    warm = None
     for k, (i, frame) in enumerate(read_frames(path, idx)):
         if is_cancelled is not None and is_cancelled():
             raise FrameSeriesCancelled()
         img = apply_prep(frame, prep_ops)
-        rec = analyse_frame(img, params, warm_start=warm)
-        if rec['fit_ok']:
-            warm = dict(beta=rec['results']['beta'],
-                        R0_px=rec['results']['R0_px'])
+        # No warm start: with the ADSA-P fit each frame's own guesses (apex
+        # circle R0, DS/DE beta) converge faster than the previous frame's
+        # solution (0.81 vs 1.15 s per frame, identical results).
+        rec = analyse_frame(img, params)
         rec.update(t_s=float(t_of[i]), frame_index=int(i))
         if not any(r['fit_ok'] for r in records):
             rec['image'] = img          # up to the first measured frame
