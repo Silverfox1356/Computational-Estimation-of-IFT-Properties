@@ -95,6 +95,7 @@ QFrame#CalloutGood { background: #f0faf2; border: 1px solid #9fd0a9; border-radi
 QFrame#CalloutInfo { background: #eef5fc; border: 1px solid #a9c9ec; border-radius: 3px; }
 QLabel#Note { color: #5c6470; }
 QFrame#CurvePicker { background: #ffffff; border: 1px solid #b9c2cc; }
+QWidget#LogPlot { background: #ffffff; }
 QToolButton#PickerButton { background: #ffffff; border: 1px solid #b9c2cc; border-radius: 3px;
     padding: 2px 6px; }
 QToolButton#PickerButton:hover { border-color: #5a85e2; }

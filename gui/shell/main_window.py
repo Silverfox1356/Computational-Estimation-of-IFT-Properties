@@ -146,6 +146,7 @@ class StudioWindow(QMainWindow):
         self._guide = None                   # the Guide window, made when first opened
         self._after_logging = None           # single-frame Yang run: (IFT csv, Yang kwargs)
         self.scale_method = 'needle'
+        self.rate_unit = 'spf'               # frame rate typed as s per frame or frames per s
         self.statuses = nodes.node_statuses(None)
         self.job = None
         self._pick_cb = None

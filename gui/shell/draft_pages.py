@@ -14,9 +14,9 @@ so the pages hold controls and results only.
 from pathlib import Path
 
 from PyQt6.QtCore import Qt
-from PyQt6.QtWidgets import (QButtonGroup, QComboBox, QDoubleSpinBox, QLabel, QLineEdit,
-                             QListWidget, QListWidgetItem, QPushButton, QRadioButton,
-                             QSizePolicy, QSlider, QSpinBox)
+from PyQt6.QtWidgets import (QButtonGroup, QComboBox, QDoubleSpinBox, QHBoxLayout, QLabel,
+                             QLineEdit, QListWidget, QListWidgetItem, QPushButton,
+                             QRadioButton, QSizePolicy, QSlider, QSpinBox, QWidget)
 
 from core import frame_log as fl
 from core import presets as P
@@ -75,6 +75,61 @@ def _optional_number(text, name):
         return float(text)
     except ValueError:
         raise DraftError(f"{name}: '{text}' is not a number") from None
+
+
+class RateBox(QWidget):
+    """How often a frame is logged, typed either as seconds per frame or as
+    frames per second (the unit the user picks, remembered by the window).
+    ``interval`` is always seconds per frame; ``changed`` gets it."""
+
+    UNITS = (('spf', 's / frame'), ('fps', 'fps'))
+
+    def __init__(self, window, interval_s, lo_s, hi_s, changed):
+        super().__init__()
+        self.w = window
+        self.interval = float(interval_s)
+        self.lo, self.hi = lo_s, hi_s
+        self.changed = changed
+        self.spin = QDoubleSpinBox()
+        self.spin.setDecimals(3)
+        self.spin.setKeyboardTracking(False)
+        self.unit = QComboBox()
+        for key, text in self.UNITS:
+            self.unit.addItem(text, key)
+        self.unit.setCurrentIndex(max(self.unit.findData(window.rate_unit), 0))
+        row = QHBoxLayout(self)
+        row.setContentsMargins(0, 0, 0, 0)
+        row.setSpacing(6)
+        row.addWidget(self.spin, 1)
+        row.addWidget(self.unit)
+        self._show()
+        self.spin.valueChanged.connect(self._edited)
+        self.unit.currentIndexChanged.connect(self._unit_changed)
+
+    def fps(self):
+        return self.unit.currentData() == 'fps'
+
+    def _show(self):
+        self.spin.blockSignals(True)
+        if self.fps():
+            self.spin.setRange(1.0 / self.hi, 1.0 / self.lo)
+            self.spin.setSingleStep(1.0)
+            self.spin.setSuffix(' fps')
+            self.spin.setValue(1.0 / self.interval)
+        else:
+            self.spin.setRange(self.lo, self.hi)
+            self.spin.setSingleStep(1.0)
+            self.spin.setSuffix(' s')
+            self.spin.setValue(self.interval)
+        self.spin.blockSignals(False)
+
+    def _unit_changed(self, _i):
+        self.w.rate_unit = self.unit.currentData()
+        self._show()
+
+    def _edited(self, v):
+        self.interval = 1.0 / v if self.fps() else v
+        self.changed(self.interval)
 
 
 class DraftPages:
@@ -539,7 +594,7 @@ class DraftPages:
                     f"(steps {p['min_step']:.3g} to {p['max_step']:.3g} s), about {mins} min.")
             elif d.kind == 'camera':
                 plan_label.setText(
-                    f"A frame every {p['interval_s']:g} s" +
+                    f"A frame every {p['interval_s']:g} s ({1 / p['interval_s']:.3g} fps)" +
                     (f" for {p['duration_s'] / 60:g} min ({p['n']} frames)." if p['duration_s']
                      else " until stopped."))
             else:
@@ -553,20 +608,22 @@ class DraftPages:
         if d.kind == 'video':
             mode = QComboBox()
             mode.addItem('Dense early, then sparser', 'dense_early')
-            mode.addItem('One frame every N seconds', 'interval')
+            mode.addItem('Even spacing (frame rate)', 'interval')
             mode.setCurrentIndex(max(mode.findData(s.get('mode')), 0))
             n = QSpinBox()
             n.setRange(2, 5000)
             n.setValue(int(s.get('n_frames') or 120))
             first = QLineEdit('' if not s.get('first_step_s') else f"{s['first_step_s']:g}")
             first.setPlaceholderText('automatic')
-            iv = _spin(s.get('interval_s') or 5.0, 0.001, 1e6, 3, 1, ' s')
+            # No faster than the video's own frame rate.
+            iv = RateBox(self.w, s.get('interval_s') or 5.0, 1.0 / d.source['fps'], 1e6,
+                         lambda _v: read())
             until = QLineEdit('' if s.get('t_end_s') is None else f"{s['t_end_s']:g}")
             until.setPlaceholderText('end of the video')
             sec.form.addRow('Plan', mode)
             sec.form.addRow('Frames', n)
             sec.form.addRow('First step (s)', first)
-            sec.form.addRow('Interval', iv)
+            sec.form.addRow('Frame rate', iv)
             sec.form.addRow('Log until (s)', until)
 
             def rows():
@@ -580,7 +637,7 @@ class DraftPages:
                     s['mode'] = mode.currentData()
                     s['n_frames'] = n.value()
                     s['first_step_s'] = _optional_number(first.text(), 'First step')
-                    s['interval_s'] = iv.value()
+                    s['interval_s'] = iv.interval
                     s['t_end_s'] = _optional_number(until.text(), 'Log until')
                 except DraftError as e:
                     self.w.messages.add(str(e), 'warn')
@@ -588,22 +645,20 @@ class DraftPages:
                 changed()
             mode.currentIndexChanged.connect(lambda _: read())
             n.valueChanged.connect(lambda _: read())
-            iv.valueChanged.connect(lambda _: read())
             first.editingFinished.connect(read)
             until.editingFinished.connect(read)
             rows()
         elif d.kind == 'camera':
-            iv = _spin(s.get('interval_s') or 1.0, 0.05, 3600, 2, 0.5, ' s')
+            iv = RateBox(self.w, s.get('interval_s') or 1.0, 0.05, 3600, lambda _v: read_cam())
             dur = _spin((s.get('duration_s') or 0) / 60.0, 0, 100000, 1, 1, ' min')
             dur.setSpecialValueText('until stopped')
-            sec.form.addRow('Interval', iv)
+            sec.form.addRow('Frame rate', iv)
             sec.form.addRow('Stop after', dur)
 
             def read_cam():
-                s['interval_s'] = iv.value()
+                s['interval_s'] = iv.interval
                 s['duration_s'] = dur.value() * 60.0 or None
                 changed()
-            iv.valueChanged.connect(lambda _: read_cam())
             dur.valueChanged.connect(lambda _: read_cam())
         sec.widget(plan_label)
         lay.addWidget(sec)

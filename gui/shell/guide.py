@@ -67,11 +67,16 @@ before thresholding, so the level can be changed later and the log rebuilt
 (stored analysis results then become out of date). Tick <b>Show
 thresholded</b> on the Frame tab to see what the fit sees.</p>""",
     'logger': """
-<p>Which frames are logged and which columns the log keeps.</p>
+<p>Which frames are logged and which columns the log keeps. While logging,
+the Live tab shows the newest frame beside IFT and volume against time (one
+graph, two axes); the Table tab fills in row by row.</p>
 <ul>
 <li><b>Dense early, then sparser</b> spaces frames finely just after the drop
-forms, when the IFT changes fastest. <b>One frame every N seconds</b> spaces
-them evenly.</li>
+forms, when the IFT changes fastest. <b>Even spacing</b> logs at a fixed
+<b>frame rate</b>, typed as seconds per frame or as frames per second (at most
+the video's own frame rate). Fewer frames make a smaller session folder.</li>
+<li>Camera: the frame rate works the same way (at most 20 frames per
+second).</li>
 <li>Camera: if a fit takes longer than the interval, the next frame is taken
 as soon as it finishes; the log records the real times.</li>
 <li>One fit gives every column, so leaving a column out saves almost no time.

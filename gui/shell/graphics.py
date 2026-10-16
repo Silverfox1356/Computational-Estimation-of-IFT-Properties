@@ -10,8 +10,10 @@ The Graphics area: one tab widget whose tabs appear when their data exists.
                their numbers, or the reference frame of a session being
                set up, with the set-up tools (crop box, scale reference,
                baseline row) and the fitted outline
-    Log Plot   any logged column against time, QC pass / fail coloured;
-               clicking a point shows that frame
+    Log Plot   IFT and volume against time on one graph (two axes), or any
+               logged column; QC pass / fail coloured; clicking a point
+               shows that frame.  While logging it grows live beside the
+               newest frame (the Live tab)
     Swelling, Bagalkot Fit, Yang Fit, Mesh
                the stored result of each analysis that has run
 """
@@ -38,6 +40,8 @@ from gui.shell.panels import fmt
 from gui.shell.result_views import (BagalkotView, ModelView, SimulationView,
                                     SwellingView, YangView)
 from gui.shell.theme import PLOT_FAIL, PLOT_LINE, PLOT_PASS
+
+VOLUME_COLOUR = '#e8590c'           # volume on the Log Plot's right axis
 from gui.styles import make_cosmetic_pen as _cosmetic_pen
 
 COL_BASELINE = '#e03131'
@@ -545,10 +549,17 @@ class FrameViewer(QWidget):
 
 # ---------------------------------------------------------------------------
 class LogPlot(QWidget):
+    """Logged columns against time.  The first choice, when both are logged,
+    is IFT (left axis, circles) and volume (right axis, squares) on one
+    graph; any single column can be chosen instead."""
+
     frame_clicked = pyqtSignal(int)
+    BOTH = 'ift+volume'
 
     def __init__(self, parent=None):
         super().__init__(parent)
+        self.setObjectName('LogPlot')
+        self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
         self.log = None
         lay = QVBoxLayout(self)
         lay.setContentsMargins(0, 0, 0, 0)
@@ -566,7 +577,7 @@ class LogPlot(QWidget):
         tb.addWidget(self.chk_failed)
         lay.addWidget(tb)
         self.plot = pg.PlotWidget(background='w')
-        for ax in ('left', 'bottom'):
+        for ax in ('left', 'bottom', 'right'):
             a = self.plot.getAxis(ax)
             a.setPen(pg.mkPen('#555'))
             a.setTextPen(pg.mkPen('#222'))
@@ -576,50 +587,106 @@ class LogPlot(QWidget):
         self.pts = pg.ScatterPlotItem(size=7, pen=pg.mkPen(None), hoverable=True)
         self.pts.sigClicked.connect(self._clicked)
         self.plot.addItem(self.pts)
+        # The volume's own view box, on the right axis, sharing the time axis.
+        pi = self.plot.plotItem
+        self.vb2 = pg.ViewBox()
+        pi.scene().addItem(self.vb2)
+        pi.getAxis('right').linkToView(self.vb2)
+        self.vb2.setXLink(pi.vb)
+        pi.vb.sigResized.connect(self._sync_views)
+        self.line2 = pg.PlotDataItem([], [], pen=pg.mkPen(VOLUME_COLOUR, width=1))
+        self.pts2 = pg.ScatterPlotItem(size=7, symbol='s', pen=pg.mkPen(None), hoverable=True)
+        self.pts2.sigClicked.connect(self._clicked)
+        self.vb2.addItem(self.line2)
+        self.vb2.addItem(self.pts2)
         self.legend = QLabel('')
         self.legend.setObjectName('Note')
         self.legend.setWordWrap(True)
         lay.addWidget(self.plot, 1)
         lay.addWidget(self.legend)
 
+    def _sync_views(self):
+        vb = self.plot.plotItem.vb
+        self.vb2.setGeometry(vb.sceneBoundingRect())
+        self.vb2.linkedViewChanged(vb, self.vb2.XAxis)
+
     def set_log(self, log):
+        # The choice is kept while the same log grows (live) or is redrawn;
+        # another session starts on IFT and volume.
+        keep = self.combo.currentData() if log is self.log else None
         self.log = log
-        keep = self.combo.currentData()
         self.combo.blockSignals(True)
         self.combo.clear()
-        for key in (log.columns if log else ()):
+        cols = log.columns if log else ()
+        if 'ift_mNm' in cols and 'volume_uL' in cols:
+            self.combo.addItem('IFT and volume', self.BOTH)
+        for key in cols:
             if key in fl.OPTIONAL_KEYS:
                 c = fl.COLUMNS[key]
                 self.combo.addItem(f"{c.label} ({c.unit})" if c.unit else c.label, key)
         i = self.combo.findData(keep)
         if i < 0:
-            i = max(self.combo.findData('ift_mNm'), 0)
+            i = next((j for j in (self.combo.findData(self.BOTH), self.combo.findData('ift_mNm'))
+                      if j >= 0), 0)
         self.combo.setCurrentIndex(i)
         self.combo.blockSignals(False)
         self.redraw()
 
-    def redraw(self):
-        key = self.combo.currentData()
-        if self.log is None or key is None:
-            self.line.setData([], [])
-            self.pts.setData([])
-            return
+    def _rows(self, key):
         rows = sorted(self.log.rows, key=lambda r: r['time_s'])
         if not self.chk_failed.isChecked():
             rows = [r for r in rows if r['qc_pass']]
-        rows = [r for r in rows if math.isfinite(r[key])]
+        return [r for r in rows if math.isfinite(r[key])]
+
+    def _draw(self, line, pts, key, ok_colour, symbol):
+        rows = self._rows(key)
         t = np.array([r['time_s'] for r in rows])
         y = np.array([r[key] for r in rows])
-        self.line.setData(t, y)
-        self.pts.setData([dict(pos=(a, b), data=r['frame_index'],
-                               brush=pg.mkBrush(PLOT_PASS if r['qc_pass'] else PLOT_FAIL))
-                          for a, b, r in zip(t, y, rows)])
+        line.setData(t, y)
+        pts.setData([dict(pos=(a, b), data=r['frame_index'], symbol=symbol,
+                          brush=pg.mkBrush(ok_colour if r['qc_pass'] else PLOT_FAIL))
+                     for a, b, r in zip(t, y, rows)])
+        return rows
+
+    @staticmethod
+    def _label(key):
         c = fl.COLUMNS[key]
-        self.plot.setLabel('left', f"{c.label} ({c.unit})" if c.unit else c.label)
+        return f"{c.label} ({c.unit})" if c.unit else c.label
+
+    def redraw(self):
+        key = self.combo.currentData()
+        pi = self.plot.plotItem
+        if self.log is None or key is None:
+            for item in (self.line, self.line2):
+                item.setData([], [])
+            for item in (self.pts, self.pts2):
+                item.setData([])
+            pi.hideAxis('right')
+            return
+        both = key == self.BOTH
+        rows = self._draw(self.line, self.pts, 'ift_mNm' if both else key, PLOT_PASS, 'o')
+        self.plot.setLabel('left', self._label('ift_mNm' if both else key))
+        if both:
+            vrows = self._draw(self.line2, self.pts2, 'volume_uL', VOLUME_COLOUR, 's')
+            pi.showAxis('right')
+            self.plot.setLabel('right', self._label('volume_uL'))
+            self._sync_views()
+            self.vb2.enableAutoRange(axis=pg.ViewBox.YAxis)
+        else:
+            vrows = []
+            self.line2.setData([], [])
+            self.pts2.setData([])
+            pi.hideAxis('right')
         self.plot.enableAutoRange()
         n_fail = sum(1 for r in rows if not r['qc_pass'])
-        self.legend.setText(f"  {len(rows)} point(s). Green: passed QC. Red: failed QC "
-                            f"({n_fail}). Click a point to show its frame.")
+        if both:
+            self.legend.setText(
+                f"  IFT: circles, left axis ({len(rows)} points). Volume: orange squares, right "
+                f"axis ({len(vrows)} points). Red: failed QC ({n_fail}). Click a point to show "
+                f"its frame.")
+        else:
+            self.legend.setText(f"  {len(rows)} point(s). Green: passed QC. Red: failed QC "
+                                f"({n_fail}). Click a point to show its frame.")
 
     def _clicked(self, _item, points, *_):
         if len(points):

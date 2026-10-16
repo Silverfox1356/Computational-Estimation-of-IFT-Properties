@@ -33,7 +33,12 @@ ANALYSIS_KEYS = ('swelling', 'bagalkot', 'yang', 'yang_model', 'simulation', 're
                  'frame_ift')
 
 
-PLANS = {'dense_early': 'Dense early, then sparser', 'interval': 'One frame every N seconds'}
+PLANS = {'dense_early': 'Dense early, then sparser', 'interval': 'Even spacing'}
+
+
+def _rate(interval_s):
+    return f"{fmt(interval_s)} s per frame ({fmt(1.0 / interval_s, 3)} fps)" if interval_s else '-'
+
 
 
 def sampling_rows(kind, sampling):
@@ -43,11 +48,11 @@ def sampling_rows(kind, sampling):
         return [('Plan', 'Single image, logged as one frame at t = 0', '')]
     if kind == 'camera':
         dur = s.get('duration_s')
-        return [('Interval', fmt(s.get('interval_s')), 's'),
+        return [('Frame rate', _rate(s.get('interval_s')), ''),
                 ('Stop after', f"{fmt(dur / 60.0)} min" if dur else 'stopped by hand', '')]
     rows = [('Plan', PLANS.get(s.get('mode'), s.get('mode') or '-'), '')]
     if s.get('mode') == 'interval':
-        rows.append(('Interval', fmt(s.get('interval_s')), 's'))
+        rows.append(('Frame rate', _rate(s.get('interval_s')), ''))
     else:
         rows.append(('Frames requested', s.get('n_frames', '-'), ''))
         rows.append(('First step', fmt(s['first_step_s']) if s.get('first_step_s') else 'automatic',

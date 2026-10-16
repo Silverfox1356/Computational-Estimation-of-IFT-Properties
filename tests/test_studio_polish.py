@@ -9,6 +9,8 @@ Drop Analysis Studio: the settings-page polish (2026-10-16).
     8  Yang Fit: the kD picker shows / hides curves; with many kD only the best
        and its neighbours show at first; Best only
     9  the Yang Fit tab shows no warnings; a Warnings section lists them
+    10 the frame rate can be typed as seconds per frame or frames per second
+    11 the Log Plot shows IFT and volume on one graph (two axes) by default
 
 Plain script (project convention — no pytest):
     conda run -n ift python tests/test_studio_polish.py      (a few seconds)
@@ -160,6 +162,38 @@ def run(tmp):
     sec = warnings_section(['a < b', 'second'])
     txt = ' '.join(l.text() for l in sec.findChildren(QLabel))
     check("warnings listed as bullets", txt.count('<li') == 2 and 'a &lt; b' in txt)
+
+    print("── 10: frame rate ──")
+    from types import SimpleNamespace
+    from gui.shell.draft_pages import RateBox
+    got = []
+    win = SimpleNamespace(rate_unit='spf')
+    rb = RateBox(win, 0.5, 0.05, 3600, got.append)
+    check("seconds per frame shown", rb.spin.suffix() == ' s' and rb.spin.value() == 0.5)
+    rb.unit.setCurrentIndex(rb.unit.findData('fps'))
+    check("switches to frames per second", rb.spin.suffix() == ' fps'
+          and abs(rb.spin.value() - 2.0) < 1e-9 and win.rate_unit == 'fps')
+    rb.spin.setValue(4.0)
+    check("4 fps stored as 0.25 s per frame", abs(got[-1] - 0.25) < 1e-9
+          and abs(rb.interval - 0.25) < 1e-9)
+    check("no faster than the limit", abs(rb.spin.maximum() - 20.0) < 1e-9)
+
+    print("── 11: Log Plot ──")
+    from core import frame_log as fl
+    from gui.shell.graphics import LogPlot
+    rows = [dict(time_s=float(i), frame_index=i, qc_pass=i != 2, ift_mNm=50.0 - i,
+                 volume_uL=10.0 + 0.1 * i) for i in range(5)]
+    log = SimpleNamespace(columns=['time_s', 'frame_index', 'ift_mNm', 'volume_uL'], rows=rows)
+    lp = LogPlot()
+    lp.set_log(log)
+    check("IFT and volume chosen first", lp.combo.currentData() == LogPlot.BOTH)
+    check("both drawn, volume on the right axis", len(lp.pts.points()) == 5
+          and len(lp.pts2.points()) == 5 and lp.plot.plotItem.getAxis('right').isVisible())
+    lp.combo.setCurrentIndex(lp.combo.findData('volume_uL'))
+    check("a single column hides the right axis", len(lp.pts2.points()) == 0
+          and not lp.plot.plotItem.getAxis('right').isVisible())
+    lp.set_log(SimpleNamespace(columns=['time_s', 'volume_uL'], rows=rows))
+    check("no IFT: no combined choice", lp.combo.findData(LogPlot.BOTH) < 0)
     w.discard_draft()
     w.close()
 
