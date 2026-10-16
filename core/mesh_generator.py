@@ -21,6 +21,7 @@ Outputs
     · Boundary edges with region tags for FEM boundary conditions
 """
 
+import threading
 import numpy as np
 
 try:
@@ -167,7 +168,9 @@ def generate_mesh(domain_polygon, domain_metadata=None,
     # ================================================================
     # Gmsh setup
     # ================================================================
-    gmsh.initialize()
+    # gmsh installs a Ctrl+C handler, which Python allows only on the main
+    # thread; the Studio builds the model in a background job.
+    gmsh.initialize(interruptible=threading.current_thread() is threading.main_thread())
     gmsh.option.setNumber("General.Terminal", 1 if verbose else 0)
     gmsh.model.add("pendant_drop")
 

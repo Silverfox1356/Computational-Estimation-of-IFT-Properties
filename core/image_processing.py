@@ -122,3 +122,40 @@ def binarize_drop_image(img, threshold):
     kernel = np.ones((5, 5), np.uint8)
     cleaned = cv2.morphologyEx(binary, cv2.MORPH_CLOSE, kernel, iterations=3)
     return cv2.cvtColor(cleaned, cv2.COLOR_GRAY2BGR)
+
+
+def measure_reference(roi, mode='needle'):
+    """Size in px of a reference object filling most of ``roi`` (BGR or
+    grayscale): the median width of a vertical needle, or the diameter of
+    a sphere.  Returns ``(px, marker)`` with ``marker`` in roi coordinates,
+    ``('line', (x1, y), (x2, y))`` or ``('circle', (cx, cy), r)``, or
+    ``(None, None)`` when no object is found.  (Same method as the Pendant
+    window's box calibration.)"""
+    gray = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY) if roi.ndim == 3 else roi
+    if gray.shape[0] < 3 or gray.shape[1] < 3:
+        return None, None
+    blurred = cv2.GaussianBlur(gray, (5, 5), 0)
+    _, thresh = cv2.threshold(blurred, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
+    corners = (float(thresh[0, 0]) + thresh[-1, -1] + thresh[0, -1] + thresh[-1, 0]) / 4
+    if corners > 127:                     # the object is light on dark
+        thresh = cv2.bitwise_not(thresh)
+    contours, _ = cv2.findContours(thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    if not contours:
+        return None, None
+    largest = max(contours, key=cv2.contourArea)
+    if mode == 'sphere':
+        (cx, cy), radius = cv2.minEnclosingCircle(largest)
+        return float(2 * radius), ('circle', (int(cx), int(cy)), int(radius))
+    mask = np.zeros_like(thresh)
+    cv2.drawContours(mask, [largest], -1, 255, thickness=cv2.FILLED)
+    widths, line = [], None
+    mid = mask.shape[0] // 2
+    for row in range(mask.shape[0]):
+        cols = np.where(mask[row] > 0)[0]
+        if len(cols):
+            widths.append(cols[-1] - cols[0])
+            if row == mid or line is None:
+                line = ((int(cols[0]), row), (int(cols[-1]), row))
+    if not widths:
+        return None, None
+    return float(np.median(widths)), ('line',) + line
