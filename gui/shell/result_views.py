@@ -559,7 +559,11 @@ class SimulationView(_View):
                              cmap='viridis', extend='both')
         ax.tricontour(P[:, 0], P[:, 1], T, C, levels=10, colors='white', linewidths=0.3,
                       alpha=0.4)
-        cb = fig.colorbar(tcf, ax=ax, shrink=0.85, pad=0.02, ticks=np.linspace(0, 1, 6))
+        # The colour bar hangs on the drop's axes (not on a slice of the
+        # figure), so drop and bar stay together, centred in the panel.
+        from mpl_toolkits.axes_grid1 import make_axes_locatable
+        cax = make_axes_locatable(ax).append_axes('right', size='6%', pad=0.12)
+        cb = fig.colorbar(tcf, cax=cax, ticks=np.linspace(0, 1, 6))
         cb.set_label('c / c_sat', fontsize=8)
         cb.ax.tick_params(labelsize=7)
         dom = m.get('domain') or {}
