@@ -268,7 +268,7 @@ def run(tmp):
     pump()
     next(b for b in w.settings.widget().findChildren(type(w.settings.widget().findChildren(
         __import__('PyQt6.QtWidgets', fromlist=['QPushButton']).QPushButton)[0]))
-         if b.text().startswith('Load calibration')).click()
+         if b.text() == 'Load...').click()
     pump()
     check("page button loads too", w.draft.calibration_path == str(calib) and len(asked) == 2)
 

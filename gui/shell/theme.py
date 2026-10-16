@@ -45,7 +45,7 @@ QToolButton#FileButton { background: #2b6cb0; color: #ffffff; border: none; padd
     margin: 0 4px 0 0; }
 QToolButton#FileButton:hover { background: #3b82c9; }
 QToolButton#FileButton::menu-indicator { image: none; width: 0; }
-QWidget#RibbonPage { background: #ffffff; }
+QTabWidget#Ribbon QScrollArea, QWidget#RibbonPage { background: #f7f7f7; border: none; }
 QFrame#RibbonGroup { border: none; border-right: 1px solid #e3e3e3; background: #ffffff; }
 QLabel#RibbonGroupLabel { color: #7a7a7a; font-size: 8pt; background: transparent; }
 QFrame#RibbonGroup QToolButton { border: 1px solid transparent; border-radius: 3px; padding: 2px 3px;
@@ -81,6 +81,10 @@ QLabel#LegendLabel { color: #5c6470; font-size: 8pt; }
 QWidget#PageBody { background: #ffffff; }
 QLabel#PageTitle { font-size: 13pt; font-weight: 600; color: #1d3557; }
 QLabel#PageCrumb { color: #6b7380; }
+QLabel#WarningList { color: #7a4a00; }
+QLabel#NoWarnings { color: #2f7a44; }
+/* page buttons: one height, no icons, rows of equal widths (pages.FlowLayout) */
+QWidget#PageBody QPushButton { min-height: 20px; min-width: 52px; padding: 3px 14px; }
 QToolButton#SectionHeader { background: #eef1f5; border: 1px solid #d9dfe7; padding: 3px 6px;
     font-weight: 600; color: #2a3a4f; text-align: left; }
 QLabel#FieldValue { background: #f3f5f7; border: 1px solid #d3d8de; padding: 2px 5px; }
@@ -90,6 +94,11 @@ QFrame#Callout { background: #fff8e6; border: 1px solid #e0b252; border-radius: 
 QFrame#CalloutGood { background: #f0faf2; border: 1px solid #9fd0a9; border-radius: 3px; }
 QFrame#CalloutInfo { background: #eef5fc; border: 1px solid #a9c9ec; border-radius: 3px; }
 QLabel#Note { color: #5c6470; }
+QFrame#CurvePicker { background: #ffffff; border: 1px solid #b9c2cc; }
+QToolButton#PickerButton { background: #ffffff; border: 1px solid #b9c2cc; border-radius: 3px;
+    padding: 2px 6px; }
+QToolButton#PickerButton:hover { border-color: #5a85e2; }
+QScrollArea#ResultScroll, QWidget#ResultBody { background: #ffffff; border: none; }
 QLabel#PickHint { background: #fff4c2; border-bottom: 1px solid #e0c060; padding: 5px 10px;
     color: #5a4500; font-weight: 600; }
 
@@ -141,6 +150,22 @@ QMenu::separator { height: 1px; background: #e0e3e7; margin: 3px 8px; }
 QDialog, QMessageBox, QInputDialog, QFileDialog { background: #f3f4f6; }
 QToolTip { background: #ffffdc; color: #1f2328; border: 1px solid #b9b9a0; padding: 2px; }
 QListWidget { border: 1px solid #d3d8de; background: #ffffff; }
+QTextBrowser { border: 1px solid #d3d8de; background: #ffffff; color: #1f2328; }
+QListWidget::item:selected { background: #cce4f7; color: #1f2328; }
+
+/* scroll bars: always drawn (the Windows 11 style hides them until hovered) */
+QScrollBar:vertical { background: #f0f2f5; width: 12px; margin: 0; border: none;
+    border-left: 1px solid #dde2e8; }
+QScrollBar:horizontal { background: #f0f2f5; height: 12px; margin: 0; border: none;
+    border-top: 1px solid #dde2e8; }
+QScrollBar::handle:vertical { background: #b3bcc7; min-height: 28px; border-radius: 4px;
+    margin: 2px 2px 2px 3px; }
+QScrollBar::handle:horizontal { background: #b3bcc7; min-width: 28px; border-radius: 4px;
+    margin: 3px 2px 2px 2px; }
+QScrollBar::handle:hover { background: #8a9aae; }
+QScrollBar::handle:pressed { background: #2b6cb0; }
+QScrollBar::add-line, QScrollBar::sub-line { width: 0; height: 0; border: none; background: none; }
+QScrollBar::add-page, QScrollBar::sub-page { background: none; }
 
 /* status bar */
 QStatusBar { background: #f3f3f3; border-top: 1px solid #cfcfcf; }
@@ -165,6 +190,12 @@ QAbstractSpinBox::up-arrow:disabled, QAbstractSpinBox::up-arrow:off {{
     image: url({_ASSETS}/spin_up_off.svg); }}
 QAbstractSpinBox::down-arrow:disabled, QAbstractSpinBox::down-arrow:off {{
     image: url({_ASSETS}/spin_down_off.svg); }}
+QListView::indicator {{ width: 13px; height: 13px; border: 1px solid #8a96a3; border-radius: 2px;
+    background: #ffffff; }}
+QListView::indicator:checked {{ background: #2b6cb0; border-color: #1f5a96;
+    image: url({_ASSETS}/check.svg); }}
+QListView::indicator:disabled {{ background: #e3e6ea; border-color: #b9c2cc; }}
+QListView::indicator:checked:disabled {{ background: #9fb3c8; border-color: #9fb3c8; }}
 """
 
 

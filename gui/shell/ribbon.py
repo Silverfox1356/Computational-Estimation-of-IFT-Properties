@@ -19,6 +19,9 @@ class RibbonPage(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setObjectName('RibbonPage')
+        # Paint the stylesheet background: otherwise the scroll area's
+        # viewport shows through, black when Windows is in dark mode.
+        self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
         self._row = QHBoxLayout(self)
         self._row.setContentsMargins(2, 2, 2, 0)
         self._row.setSpacing(0)

@@ -94,12 +94,11 @@ def draft_statuses(draft):
     st['log'] = ('off', 'Nothing logged yet.')
     if draft.kind == 'image':
         if 'scale' in missing or 'baseline' in missing:
-            st['yang'] = ('input', 'Single frame: set the scale and the baseline first.')
+            st['yang'] = ('input', 'Set the scale and the baseline first.')
         elif not (draft.calibration_path and draft.ift_curve_path):
-            st['yang'] = ('input', 'Single frame: load the gamma(c) calibration and the '
-                          'IFT-vs-time CSV.')
+            st['yang'] = ('input', 'Load the gamma(c) calibration and IFT(t).')
         else:
-            st['yang'] = ('ready', 'Ready: Continue with single frame.')
+            st['yang'] = ('ready', 'Ready to run.')
         st['analyses'] = st['yang']
     if 'scale' in missing or 'baseline' in missing:
         st['frame_ift'] = ('off', 'Set the scale and the baseline first.')

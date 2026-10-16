@@ -186,6 +186,9 @@ def studio_checks(tmp):
     check("inner diameter shows automatic", idd.value() == 0 and 'id_mm' not in w.draft.needle)
     idd.setValue(0.4)
     pump()
+    check("nothing changes before Apply", 'id_mm' not in w.draft.needle)
+    button('Apply').click()
+    pump()
     check("inner diameter reaches the draft", w.draft.needle.get('id_mm') == 0.4)
     w.select_node('fluids')
     button('Save as...').click()           # needle section comes first
@@ -218,7 +221,7 @@ def studio_checks(tmp):
     idd = next(s for s in w.settings.widget().findChildren(QDoubleSpinBox)
                if s.specialValueText().startswith('automatic'))
     idd.setValue(0.5)
-    button('Apply inner diameter').click()
+    button('Apply').click()
     pump()
     check("ID applied to the session", w.folder.session.needle.get('id_mm') == 0.5)
     check("simulation marked out of date, saying why", w.statuses['simulation'][0] == 'stale'

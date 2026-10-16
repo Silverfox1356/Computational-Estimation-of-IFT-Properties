@@ -13,6 +13,8 @@ settings and running analyses come in later steps; their buttons are shown
 disabled with a note saying so.
 """
 
+import html
+
 from PyQt6.QtCore import QPoint, QRect, QSize, QUrl, Qt
 from PyQt6.QtGui import QDesktopServices
 from PyQt6.QtWidgets import (QFormLayout, QFrame, QHBoxLayout, QLabel, QLayout,
@@ -21,17 +23,14 @@ from PyQt6.QtWidgets import (QFormLayout, QFrame, QHBoxLayout, QLabel, QLayout,
                              QWidget)
 
 from core import frame_log as fl
-from gui.shell.icons import icon, status_icon
+from gui.shell.icons import status_icon
 from gui.shell.nodes import NODE, STATUS_LABELS, children
 from gui.shell.panels import fmt
 
-LATER_LOGGING = ('Fixed for this session: to change it, start a new session from the same '
-                 'source (File > New session) and log again.')
+LATER_LOGGING = 'Fixed for this session (start a new session to change it).'
 ANALYSIS_KEYS = ('swelling', 'bagalkot', 'yang', 'yang_model', 'simulation', 'results',
                  'threshold',
                  'frame_ift')
-LATER_ANALYSIS = ('Running analyses from a session is built in a later step; until then '
-                  'use the Pendant Drop window.')
 
 
 PLANS = {'dense_early': 'Dense early, then sparser', 'interval': 'One frame every N seconds'}
@@ -62,22 +61,28 @@ def sampling_rows(kind, sampling):
 
 
 def _crumb(key):
+    """Where ``key`` sits in the tree, each step a link to its page."""
     parts = []
     k = NODE[key].parent
     while k is not None:
-        parts.append(NODE[k].label)
+        parts.append(f'<a href="{k}" style="color:#2b6cb0; text-decoration:none">'
+                     f'{html.escape(NODE[k].label)}</a>')
         k = NODE[k].parent
-    return ' > '.join(reversed(parts)) or 'Analysis Builder'
+    return ' &gt; '.join(reversed(parts)) or 'Analysis Builder'
 
 
 class FlowLayout(QLayout):
     """Lays widgets out left to right and starts a new line when the next
     one does not fit (Qt's flow layout example), so a row of buttons wraps
-    instead of holding the Settings panel wide."""
+    instead of holding the Settings panel wide.  ``uniform`` gives every
+    item the width of the widest, ``right`` aligns each line right (the
+    page's main actions sit bottom-right)."""
 
-    def __init__(self, parent=None, spacing=6):
+    def __init__(self, parent=None, spacing=6, uniform=False, right=False):
         super().__init__(parent)
         self._items = []
+        self.uniform = uniform
+        self.right = right
         self.setContentsMargins(0, 0, 0, 0)
         self.setSpacing(spacing)
 
@@ -113,35 +118,58 @@ class FlowLayout(QLayout):
         size = QSize()
         for it in self._items:
             size = size.expandedTo(it.minimumSize())
+        if self.uniform:
+            size = size.expandedTo(QSize(self._widest(), 0))
         m = self.contentsMargins()
         return size + QSize(m.left() + m.right(), m.top() + m.bottom())
+
+    def _widest(self):
+        return max((it.sizeHint().width() for it in self._items if not it.isEmpty()), default=0)
 
     def _place(self, rect, apply):
         m = self.contentsMargins()
         r = rect.adjusted(m.left(), m.top(), -m.right(), -m.bottom())
-        x, y, line_h = r.x(), r.y(), 0
         sp = self.spacing()
+        same = self._widest() if self.uniform else None
+        lines, line, x = [], [], r.x()
         for it in self._items:
             if it.isEmpty():
                 continue
             hint = it.sizeHint()
-            w = min(hint.width(), max(r.width(), it.minimumSize().width()))
-            if x > r.x() and x + w > r.right() + 1:
-                x, y, line_h = r.x(), y + line_h + sp, 0
-            if apply:
-                it.setGeometry(QRect(QPoint(x, y), QSize(w, hint.height())))
+            w = min(same or hint.width(), max(r.width(), it.minimumSize().width()))
+            if line and x + w > r.right() + 1:
+                lines.append(line)
+                line, x = [], r.x()
+            line.append((it, w, hint.height()))
             x += w + sp
-            line_h = max(line_h, hint.height())
-        return y + line_h - rect.y() + m.bottom()
+        if line:
+            lines.append(line)
+        y = r.y()
+        for line in lines:
+            used = sum(w for _, w, _ in line) + sp * (len(line) - 1)
+            x = r.x() + (max(0, r.width() - used) if self.right else 0)
+            for it, w, h in line:
+                if apply:
+                    it.setGeometry(QRect(QPoint(x, y), QSize(w, h)))
+                x += w + sp
+            y += max(h for _, _, h in line) + sp
+        return (y - sp if lines else y) - rect.y() + m.bottom()
 
 
-def flow_row(*widgets):
+def flow_row(*widgets, uniform=False, right=False):
     """A widget holding ``widgets`` in a FlowLayout."""
     w = QWidget()
-    f = FlowLayout(w)
+    f = FlowLayout(w, uniform=uniform, right=right)
     for x in widgets:
         f.addWidget(x)
     return w
+
+
+def actions(*buttons):
+    """The page's main buttons (Run, Apply ...): equal widths, bottom-right."""
+    row = flow_row(*buttons, uniform=True, right=True)
+    row.setContentsMargins(0, 8, 0, 0)
+    return row
 
 
 class Section(QWidget):
@@ -179,7 +207,17 @@ class Section(QWidget):
         self.body.setVisible(on)
         self.header.setArrowType(Qt.ArrowType.DownArrow if on else Qt.ArrowType.RightArrow)
 
-    def field(self, label, value, unit='', result=False):
+    def field(self, label, value, unit='', result=False, buttons=()):
+        """A read-only value with its unit; ``buttons`` sit on the same row
+        (Load..., Go to ...).  ``value`` None: the buttons alone."""
+        row = QHBoxLayout()
+        row.setSpacing(6)
+        if value is None:
+            for b in buttons:
+                row.addWidget(b)
+            row.addStretch(1)
+            self.form.addRow(label, row)
+            return None
         v = QLabel(str(value))
         v.setObjectName('FieldValueResult' if result else 'FieldValue')
         v.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
@@ -187,17 +225,37 @@ class Section(QWidget):
         v.setToolTip(str(value))             # long paths are clipped, not lost
         v.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
         v.setMinimumWidth(60)
-        row = QHBoxLayout()
-        row.setSpacing(6)
         row.addWidget(v, 1)
-        u = QLabel(unit)
-        u.setObjectName('FieldUnit')
-        u.setMinimumWidth(30)
-        row.addWidget(u)
+        if unit or not buttons:
+            u = QLabel(unit)
+            u.setObjectName('FieldUnit')
+            u.setMinimumWidth(30)
+            row.addWidget(u)
+        for b in buttons:
+            row.addWidget(b)
         self.form.addRow(label, row)
+        return v
 
     def widget(self, w):
         self.form.addRow(w)
+
+
+def warnings_section(items, title='Warnings'):
+    """The warnings of a result as a bulleted list, or 'No warnings'."""
+    sec = Section(title)
+    if items:
+        lbl = QLabel('<ul style="margin:0 0 0 -24px">'
+                     + ''.join(f'<li style="margin-bottom:3px">{html.escape(w)}</li>' for w in items)
+                     + '</ul>')
+        lbl.setObjectName('WarningList')
+        lbl.setTextFormat(Qt.TextFormat.RichText)
+    else:
+        lbl = QLabel('No warnings')
+        lbl.setObjectName('NoWarnings')
+    lbl.setWordWrap(True)
+    lbl.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+    sec.widget(lbl)
+    return sec
 
 
 def callout(text, kind='warn'):
@@ -214,22 +272,24 @@ def callout(text, kind='warn'):
 
 def ift_result_section(rec, title='Result'):
     """The full result of one drop-shape fit (an analyse_frame record):
-    what the old Static mode's result card showed."""
+    what the old Static mode's result card showed, then its warnings."""
+    box = QWidget()
+    v = QVBoxLayout(box)
+    v.setContentsMargins(0, 0, 0, 0)
+    v.setSpacing(0)
     sec = Section(title)
+    v.addWidget(sec)
     if not rec.get('fit_ok'):
-        sec.widget(callout(f"The fit failed: {rec.get('error') or 'no reason given'}."))
-        return sec
+        sec.field('Fit', 'failed')
+        v.addWidget(warnings_section([f"The fit failed: {rec.get('error') or 'no reason given'}."]))
+        return box
     r = rec.get('results') or {}
     unc = rec.get('ift_unc_mNm')
     sec.field('Interfacial tension', f"{rec['ift_mNm']:.2f}"
-              + (f" \u00b1 {unc:.2f}" if unc is not None and unc == unc else ''),
+              + (f" ± {unc:.2f}" if unc is not None and unc == unc else ''),
               'mN/m', result=True)
     fails = [(n, d) for n, ok, d in r.get('qc_checks', []) if not ok]
-    if rec.get('qc_pass'):
-        sec.widget(callout('Quality checks passed.', 'good'))
-    else:
-        sec.widget(callout('Quality checks not passed: ' + '; '.join(
-            f"{n} ({d})" for n, d in fails) + '. Treat this IFT with care.'))
+    sec.field('Quality checks', 'passed' if rec.get('qc_pass') else 'not passed')
     sec.field('Shape factor beta', fmt(rec.get('beta')))
     sec.field('Apex radius R0', fmt(rec.get('R0_mm')), 'mm')
     sec.field('Volume', fmt(rec.get('volume_uL')), 'uL')
@@ -244,11 +304,15 @@ def ift_result_section(rec, title='Result'):
             sec.field(label, fmt(r[key]), unit)
     u = r.get('uncertainty')
     if u:
-        sec.field('Uncertainty from R0 fit', f"\u00b1 {fmt(u['c_R0_fit'])}", 'mN/m')
-        sec.field('from needle tolerance', f"\u00b1 {fmt(u['c_R0_calib'])}", 'mN/m')
-        sec.field('from beta fit', f"\u00b1 {fmt(u['c_beta'])}", 'mN/m')
-        sec.field('from densities', f"\u00b1 {fmt(u['c_rho'])}", 'mN/m')
-    return sec
+        sec.field('Uncertainty from R0 fit', f"± {fmt(u['c_R0_fit'])}", 'mN/m')
+        sec.field('from needle tolerance', f"± {fmt(u['c_R0_calib'])}", 'mN/m')
+        sec.field('from beta fit', f"± {fmt(u['c_beta'])}", 'mN/m')
+        sec.field('from densities', f"± {fmt(u['c_rho'])}", 'mN/m')
+    warn = [] if rec.get('qc_pass') else [
+        'Quality checks not passed: ' + '; '.join(f"{n} ({d})" for n, d in fails)
+        + '. Treat this IFT with care.']
+    v.addWidget(warnings_section(warn))
+    return box
 
 
 def note(text):
@@ -267,6 +331,7 @@ class SettingsPanel(QScrollArea):
         self.key = 'session'
         self.setWidgetResizable(True)
         self.setFrameShape(QFrame.Shape.NoFrame)
+        self.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOn)
         self.setMinimumWidth(200)
 
     def show_node(self, key):
@@ -294,7 +359,16 @@ class SettingsPanel(QScrollArea):
         crumb = QLabel(_crumb(key))
         crumb.setObjectName('PageCrumb')
         crumb.setWordWrap(True)
-        lay.addWidget(crumb)
+        crumb.setTextFormat(Qt.TextFormat.RichText)
+        crumb.setToolTip('Go to that page')
+        crumb.linkActivated.connect(self.window.select_node)
+        guide = QLabel('<a href="guide" style="color:#2b6cb0; text-decoration:none">Guide</a>')
+        guide.setToolTip('What this page does and how its settings work')
+        guide.linkActivated.connect(lambda _: self.window.show_guide(key))
+        crow = QHBoxLayout()
+        crow.addWidget(crumb, 1)
+        crow.addWidget(guide, 0, Qt.AlignmentFlag.AlignTop)
+        lay.addLayout(crow)
         status, reason = self.window.statuses.get(key, ('off', ''))
         srow = QHBoxLayout()
         si = QLabel()
@@ -313,23 +387,15 @@ class SettingsPanel(QScrollArea):
         elif folder is not None and key in ANALYSIS_KEYS:
             self.window.analysis_pages.build(key, folder, lay)
         elif folder is None and key in ('yang', 'yang_model', 'simulation'):
-            lay.addWidget(note('To find D and k from one picture of a drop: start a new session '
-                               'from the image, set the scale and baseline, then open '
-                               'Diffusivity (Yang) and click Continue with single frame. '
-                               'For a video, the camera or a saved session folder, the IFT '
-                               'against time comes from the logged frames.'))
-            row = QHBoxLayout()
-            for kind, ic, text in (('image', 'image', 'New session from an image...'),):
-                b = QPushButton(icon(ic), text)
-                b.clicked.connect(lambda _=False, k=kind: self.window.new_session(k))
-                row.addWidget(b)
-            ob = QPushButton(icon('open'), 'Open a session folder...')
+            lay.addWidget(note('Open a session, or start one from an image for a single '
+                               'frame.'))
+            b = QPushButton('From an image...')
+            b.clicked.connect(lambda: self.window.new_session('image'))
+            ob = QPushButton('Open session...')
             ob.clicked.connect(lambda: self.window.open_session_dialog())
-            row.addWidget(ob)
-            row.addStretch(1)
-            lay.addLayout(row)
+            lay.addWidget(actions(b, ob))
         elif folder is None and key != 'session':
-            lay.addWidget(note('Open a session folder to see this.'))
+            lay.addWidget(note('Open a session to see this.'))
         elif build is not None:
             build(folder, lay)
         lay.addStretch(1)
@@ -339,17 +405,18 @@ class SettingsPanel(QScrollArea):
     def _page_session(self, folder, lay):
         if folder is None:
             sec = Section('New session')
-            for kind, ic, text in (('video', 'video', 'From a video...'),
-                                   ('image', 'image', 'From an image...'),
-                                   ('camera', 'camera', 'From the camera...')):
-                b = QPushButton(icon(ic), text)
+            buttons = []
+            for kind, text in (('video', 'Video...'), ('image', 'Image...'),
+                               ('camera', 'Camera...')):
+                b = QPushButton(text)
                 b.clicked.connect(lambda _=False, k=kind: self.window.new_session(k))
-                sec.widget(b)
+                buttons.append(b)
+            sec.widget(flow_row(*buttons, uniform=True))
             lay.addWidget(sec)
-            b = QPushButton(icon('open'), 'Open session folder...')
+            b = QPushButton('Open session...')
             b.setObjectName('Primary')
             b.clicked.connect(lambda: self.window.open_session_dialog())
-            lay.addWidget(b, 0, Qt.AlignmentFlag.AlignLeft)
+            lay.addWidget(actions(b))
             return
         s = folder.session
         sec = Section('Session')
@@ -361,9 +428,9 @@ class SettingsPanel(QScrollArea):
         lay.addWidget(sec)
         for p in folder.problems:
             lay.addWidget(callout(p.message))
-        b = QPushButton(icon('open'), 'Show folder in Explorer')
+        b = QPushButton('Show in Explorer')
         b.clicked.connect(lambda: QDesktopServices.openUrl(QUrl.fromLocalFile(str(folder.path))))
-        lay.addWidget(b, 0, Qt.AlignmentFlag.AlignLeft)
+        lay.addWidget(actions(b))
 
     def _children_page(self, key, lay):
         sec = Section('Contents')
@@ -383,8 +450,7 @@ class SettingsPanel(QScrollArea):
         self._children_page('analyses', lay)
 
     def _page_report(self, folder, lay):
-        lay.addWidget(note('A printable report of the session and its analyses (settings, '
-                           'results, plots) is the next step of the overhaul.'))
+        lay.addWidget(note('Not available yet.'))
 
     def _page_fluids(self, folder, lay):
         s = folder.session
@@ -404,15 +470,15 @@ class SettingsPanel(QScrollArea):
         sec.field('Name', n.get('name') or '-')
         sec.field('Outer diameter', fmt(n['od_mm'], 6), 'mm')
         sec.field('Diameter tolerance', fmt(100 * n.get('tol_rel', 0.01), 3), '%')
-        from gui.shell.draft_pages import _button, _row, id_spin, id_value
+        from gui.shell.draft_pages import _button, id_spin, id_value
         idd = id_spin(n.get('id_mm'))
         sec.form.addRow('Inner diameter (mm)', idd)
-        sec.widget(_row(_button('Apply inner diameter', 'params',
-                                lambda: self.window.set_needle_id(id_value(idd)),
-                                tip='Only the diffusion model uses it; Yang and simulation '
-                                    'results made with another value become out of date')))
         lay.addWidget(sec)
-        lay.addWidget(note(LATER_LOGGING))
+        lay.addWidget(note('Fixed for this session, except the inner diameter.'))
+        lay.addWidget(actions(_button('Apply', lambda: self.window.set_needle_id(id_value(idd)),
+                                      primary=True,
+                                      tip='Store the inner diameter; Yang and simulation results '
+                                          'made with another value become out of date')))
 
     def _page_calibration(self, folder, lay):
         sec = Section('Calibration curve')
@@ -429,16 +495,15 @@ class SettingsPanel(QScrollArea):
             except Exception as e:                      # shown, not fatal
                 sec.widget(callout(f"The stored calibration can't be read: {e}"))
         else:
-            sec.widget(note('No calibration stored in this session. Diffusivity (Yang) '
-                            'needs one; the other analyses do not.'))
+            sec.field('File', 'not loaded')
         lay.addWidget(sec)
-        from gui.shell.draft_pages import _button, _row
-        row = [_button('Load calibration file...', 'calcurve', self.window.load_calibration,
+        from gui.shell.draft_pages import _button
+        row = [_button('Load calibration...', self.window.load_calibration,
                        tip='Validate a gamma(c) template and copy it into the session folder')]
         if folder.session.calibration:
-            row.append(_button('Remove', 'close', self.window.clear_calibration,
-                               tip='Remove the calibration from the session folder'))
-        lay.addWidget(_row(*row))
+            row.insert(0, _button('Remove', self.window.clear_calibration,
+                                  tip='Remove the calibration from the session folder'))
+        lay.addWidget(actions(*row))
 
     def _page_source(self, folder, lay):
         src = folder.session.source
@@ -465,22 +530,20 @@ class SettingsPanel(QScrollArea):
             sec.field('Top-left corner', f"x {x}, y {y}", 'px')
             sec.field('Size', f"{w} x {h}", 'px')
         else:
-            sec.widget(note('No crop: frames are stored whole.'))
+            sec.field('Region', 'whole frame')
         lay.addWidget(sec)
-        lay.addWidget(note('Stored frames are already cropped. ' + LATER_LOGGING))
+        lay.addWidget(note(LATER_LOGGING))
 
     def _page_logger(self, folder, lay):
         s = folder.session
         if self.window.logging:
-            lay.addWidget(callout('Logging is running; press Stop to end it. Frames logged '
-                                  'so far are kept.', 'info'))
+            lay.addWidget(callout('Logging. Stop keeps the frames logged so far.', 'info'))
         sec = Section('Sampling')
         for label, value, unit in sampling_rows(s.source.get('kind'), s.sampling):
             sec.field(label, value, unit)
         sec.field('Frames logged', len(folder.log))
         lay.addWidget(sec)
-        lay.addWidget(note('To log more frames or change the sampling, start a new '
-                           'session from the same source (File > New session).'))
+        lay.addWidget(note(LATER_LOGGING))
 
     def _page_scale(self, folder, lay):
         sc = folder.session.scale
@@ -498,8 +561,7 @@ class SettingsPanel(QScrollArea):
         sec.field('Row', fmt(b['y_px'], 6), 'px', result=True)
         sec.field('Method', b.get('method', '-'))
         lay.addWidget(sec)
-        lay.addWidget(note('The row is in the coordinates of the stored (cropped) frames. '
-                           + LATER_LOGGING))
+        lay.addWidget(note(LATER_LOGGING))
 
     def _page_log(self, folder, lay):
         log = folder.log
@@ -528,14 +590,14 @@ class SettingsPanel(QScrollArea):
             self.columns_list.addItem(it)
         self.columns_list.setMinimumHeight(min(22 * len(fl.OPTIONAL), 240))
         sec.widget(self.columns_list)
-        sec.widget(note('Every frame is fitted again from the stored images; the old '
-                        'log is replaced only when all frames are done.'))
         lay.addWidget(sec)
-        b = QPushButton(icon('rebuild'), 'Rebuild log')
+        b = QPushButton('Rebuild log')
         b.setObjectName('Primary')
+        b.setToolTip('Fit every stored frame again; the old log is replaced only when all '
+                     'frames are done')
         b.setEnabled(bool(folder.frame_indices()) and not self.window.job_running())
         b.clicked.connect(self._rebuild)
-        lay.addWidget(b, 0, Qt.AlignmentFlag.AlignLeft)
+        lay.addWidget(actions(b))
 
     def _rebuild(self):
         chosen = [self.columns_list.item(i).data(Qt.ItemDataRole.UserRole)

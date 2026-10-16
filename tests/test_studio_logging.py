@@ -243,21 +243,21 @@ def run(tmp):
     d.auto_baseline()
     w.draft_changed(rebuild=True)
     check("then for the two CSVs", w.statuses['yang'][0] == 'input'
-          and 'CSV' in w.statuses['yang'][1], str(w.statuses['yang']))
+          and 'IFT(t)' in w.statuses['yang'][1], str(w.statuses['yang']))
     w.select_node('yang')
-    check("Continue disabled without the CSVs",
-          not button('Continue with single frame').isEnabled())
+    check("Run disabled without the CSVs",
+          not button('Run...').isEnabled())
     w.load_calibration(str(data / 'calibration_5.67MPa.csv'))
     w.load_ift_curve(str(data / 'ift_curve_5.67MPa.csv'))
     check("Yang ready", w.statuses['yang'][0] == 'ready', str(w.statuses['yang']))
     w.select_node('yang')
     check("template buttons on the page",
-          sum(b.text() == 'Download template...' for b in
-              w.settings.widget().findChildren(QPushButton)) == 2)
+          {b.text() for b in w.settings.widget().findChildren(QPushButton)}
+          >= {'gamma(c)', 'IFT(t)'})
     dest = tmp / 'single frame'
     real_start = w.start_logging
     w.start_logging = lambda path=None: real_start(dest)
-    button('Continue with single frame').click()
+    button('Run...').click()
     check("saved, then D and k fitted", wait_job(600))
     w.start_logging = real_start
     f = w.folder
@@ -283,7 +283,7 @@ def run(tmp):
     lst = yv.findChild(QListWidget)
     check("a checkbox per kD curve", lst.count() == 7)
     lst.item(0).setCheckState(Qt.CheckState.Unchecked)
-    line, low = yv.items[lst.item(0).data(Qt.ItemDataRole.UserRole)]
+    line, low, _ = yv.items[lst.item(0).data(Qt.ItemDataRole.UserRole)]
     check("unticking hides that curve", not line.isVisible() and not low.isVisible())
     yv._set_all(True)
     check("Show all brings it back", line.isVisible())

@@ -143,7 +143,8 @@ class StudioWindow(QMainWindow):
         self.draft = None
         self.camera = None
         self.logging = False
-        self._after_logging = None           # Continue with single frame: (IFT csv, Yang kwargs)
+        self._guide = None                   # the Guide window, made when first opened
+        self._after_logging = None           # single-frame Yang run: (IFT csv, Yang kwargs)
         self.scale_method = 'needle'
         self.statuses = nodes.node_statuses(None)
         self.job = None
@@ -216,6 +217,9 @@ class StudioWindow(QMainWindow):
         self.a_table = A('table', 'Frame\nTable', self.show_table, 'Show the frame log table')
         self.a_next = A('next', 'Next', self.go_next,
                         'Go to the next step')
+        self.a_guide = A('help', 'Guide', lambda: self.show_guide(self.settings.key),
+                         'What the selected page does and how its settings work (F1)',
+                         shortcut='F1')
         self.a_calib = A('calcurve', 'Load\nCalibration', self.load_calibration,
                          'Add a gamma(c) calibration to the session')
         self.a_swell = A('swell', 'Swelling\nCheck', lambda: self.select_node('swelling'),
@@ -253,7 +257,7 @@ class StudioWindow(QMainWindow):
         home.add_group('Logger', [self.a_measure, self.a_start, self.a_stop])
         home.add_group('Frame Log', [self.a_table, self.a_rebuild])
         home.add_group('Analyses', [self.a_swell, self.a_yang, self.a_bagalkot, self.a_sim])
-        home.add_group('Guide', [self.a_next])
+        home.add_group('Guide', [self.a_next, self.a_guide])
         src = r.add_page('Source')
         src.add_group('New Session', [self.a_video, self.a_image, self.a_camera])
         src.add_group('Prepare', [self.a_crop, self.a_thresh])
@@ -821,6 +825,17 @@ class StudioWindow(QMainWindow):
         elif key in ('source', 'crop', 'threshold', 'scale', 'baseline', 'logger'):
             self.graphics.setCurrentWidget(self.graphics.frames)
 
+    def show_guide(self, key='session'):
+        """The Guide, open at the topic of ``key`` (one window, reused)."""
+        from gui.shell.guide import GuideDialog
+        if self._guide is None:
+            self._guide = GuideDialog(key, self)
+        else:
+            self._guide.show_topic(key)
+        self._guide.show()
+        self._guide.raise_()
+        self._guide.activateWindow()
+
     def _show_frame(self, frame_index):
         if self.folder is None:
             return
@@ -1072,7 +1087,7 @@ class StudioWindow(QMainWindow):
             self._after_logging = None
 
     def _run_after_logging(self, folder):
-        """The second half of Continue with single frame, once the image is saved."""
+        """The second half of a single-frame Yang run, once the image is saved."""
         job, self._after_logging = self._after_logging, None
         if job is None or self.folder is not folder:
             return

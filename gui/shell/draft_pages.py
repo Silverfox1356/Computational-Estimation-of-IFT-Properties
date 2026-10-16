@@ -4,9 +4,11 @@ gui.shell.draft_pages
 
 Settings pages for a session being set up (core.session_draft.SessionDraft).
 Each builder fills a page for one Analysis Builder node with editable
-controls; edits go straight into the draft and the tree updates.  Tools that
-need the image (crop box, scale reference, baseline row) ask the window to
-start a pick on the Frame tab.
+controls; most edits go straight into the draft and the tree updates (the
+Fluids & Needle values wait for Apply).  Tools that need the image (crop
+box, scale reference, baseline row) ask the window to start a pick on the
+Frame tab.  What each page does is explained in the Guide (gui.shell.guide),
+so the pages hold controls and results only.
 """
 
 from pathlib import Path
@@ -19,9 +21,7 @@ from PyQt6.QtWidgets import (QButtonGroup, QComboBox, QDoubleSpinBox, QLabel, QL
 from core import frame_log as fl
 from core import presets as P
 from core.session_draft import SECONDS_PER_FRAME, DraftError
-from gui.shell.icons import icon
-from gui.shell.nodes import children
-from gui.shell.pages import Section, callout, flow_row, ift_result_section, note
+from gui.shell.pages import Section, actions, flow_row, ift_result_section, note
 from gui.shell.panels import fmt
 
 
@@ -42,8 +42,7 @@ def id_spin(id_mm):
     diameter, as core.domain_builder assumes)."""
     s = _spin(id_mm or 0.0, 0.0, 100, 4, 0.01)
     s.setSpecialValueText('automatic (70 % of OD)')
-    s.setToolTip('Only the diffusion model (Yang, simulation) uses it: the liquid inside the '
-                 'needle is part of the model domain')
+    s.setToolTip('Used only by the diffusion model (Yang, simulation)')
     return s
 
 
@@ -51,13 +50,15 @@ def id_value(spin):
     return spin.value() or None
 
 
-def _row(*widgets, stretch=True):
-    """Widgets side by side, wrapping onto a new line when the panel is narrow."""
-    return flow_row(*widgets)
+def _row(*widgets, uniform=True):
+    """Widgets side by side, wrapping onto a new line when the panel is
+    narrow; buttons get one width."""
+    return flow_row(*widgets, uniform=uniform)
 
 
-def _button(text, ic, slot, primary=False, tip=''):
-    b = QPushButton(icon(ic), text)
+def _button(text, slot, primary=False, tip=''):
+    """A page button: text only, so every button on a page looks alike."""
+    b = QPushButton(text)
     if primary:
         b.setObjectName('Primary')
     if tip:
@@ -105,33 +106,38 @@ class DraftPages:
     def page_session(self, d, lay):
         sec = Section('New session')
         sec.field('Source', f"{d.kind}: {d.source.get('name', '')}")
-        sec.field('Saved', 'Not yet: the folder is created when logging starts')
+        sec.field('Saved', 'when logging starts')
         lay.addWidget(sec)
         missing = d.missing()
         sec = Section('Still needed' if missing else 'Ready')
         if missing:
             for key, msg in missing:
-                b = QPushButton(icon('next'), msg)
+                b = QPushButton(msg)
                 b.setStyleSheet('text-align:left; padding-left:8px;')
                 b.setToolTip(msg)
                 b.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Fixed)
                 b.clicked.connect(lambda _=False, k=key: self.w.select_node(k))
                 sec.widget(b)
         else:
-            sec.widget(note('Everything is set. Go to Frame Logger to check the '
-                            'sampling and start logging.'))
-            sec.widget(_button('Go to Frame Logger', 'next', lambda: self.w.select_node('logger')))
+            sec.widget(note('Everything is set.'))
         lay.addWidget(sec)
-        lay.addWidget(_button('Discard this session', 'close', self.w.discard_draft))
+        buttons = [_button('Discard', self.w.discard_draft, tip='Discard this session')]
+        if not missing:
+            buttons.append(_button('Frame Logger', lambda: self.w.select_node('logger'),
+                                   primary=True))
+        lay.addWidget(actions(*buttons))
 
     def page_global(self, d, lay):
         self.w.settings._children_page('global', lay)
 
     # -- fluids and needle ------------------------------------------------------------
     def page_fluids(self, d, lay):
+        """The values wait for Apply: picking a preset or editing a box
+        changes nothing in the draft until then."""
         needles, _ = P.list_presets('needle')
         fluids, _ = P.list_presets('fluid')
         n, f = d.needle, d.fluids
+        names = dict(needle=n.get('name'), fluid=f.get('name'))
 
         sec = Section('Needle')
         combo_n = QComboBox()
@@ -147,28 +153,8 @@ class DraftPages:
         sec.form.addRow('Outer diameter (mm)', od)
         sec.form.addRow('Tolerance (%)', tol)
         sec.form.addRow('Inner diameter (mm)', idd)
-        sec.widget(self._preset_buttons(
-            'needle', combo_n,
-            lambda: dict(od_mm=od.value(), id_mm=id_value(idd), od_tol_pct=tol.value())))
         lay.addWidget(sec)
-
-        def set_needle(name=None):
-            self._apply(lambda: d.set_needle(od.value(), tol.value() / 100.0,
-                                             name or '(custom)', id_mm=id_value(idd)))
-        for w in (od, tol, idd):
-            w.valueChanged.connect(lambda _: set_needle())
-
-        def pick_needle(_i):
-            p = combo_n.currentData()
-            if p is None:
-                return
-            for s, v in ((od, p.values['od_mm']), (tol, p.values['od_tol_pct']),
-                         (idd, p.values.get('id_mm') or 0.0)):
-                s.blockSignals(True)
-                s.setValue(float(v))
-                s.blockSignals(False)
-            set_needle(p.name)
-        combo_n.currentIndexChanged.connect(pick_needle)
+        needle_sec = sec
 
         sec = Section('Fluids')
         combo_f = QComboBox()
@@ -191,63 +177,105 @@ class DraftPages:
                            ('Surrounding tolerance (%)', tout),
                            ('Pressure (MPa)', pres), ('Temperature (C)', temp)):
             sec.form.addRow(label, wdg)
-        sec.widget(self._preset_buttons(
-            'fluid', combo_f,
-            lambda: dict(rho_in=rin.value(), rho_out=rout.value(), rho_in_tol_pct=tin.value(),
-                         rho_out_tol_pct=tout.value(),
-                         P_MPa=_optional_number(pres.text(), 'Pressure'),
-                         T_C=_optional_number(temp.text(), 'Temperature'))))
         lay.addWidget(sec)
 
-        def set_fluids(name=None):
-            def go():
-                d.set_fluids(density_inner=rin.value(), density_outer=rout.value(),
-                             rho_in_tol_rel=tin.value() / 100.0,
-                             rho_out_tol_rel=tout.value() / 100.0,
-                             pressure_MPa=_optional_number(pres.text(), 'Pressure'),
-                             temperature_C=_optional_number(temp.text(), 'Temperature'),
-                             name=name or '(custom)')
-            self._apply(go)
-        for s in (rin, rout, tin, tout):
-            s.valueChanged.connect(lambda _: set_fluids())
-        pres.editingFinished.connect(set_fluids)
-        temp.editingFinished.connect(set_fluids)
+        pending = note('')
+        pending.setVisible(False)
+
+        def go():
+            d.set_needle(od.value(), tol.value() / 100.0, names['needle'] or '(custom)',
+                         id_mm=id_value(idd))
+            d.set_fluids(density_inner=rin.value(), density_outer=rout.value(),
+                         rho_in_tol_rel=tin.value() / 100.0,
+                         rho_out_tol_rel=tout.value() / 100.0,
+                         pressure_MPa=_optional_number(pres.text(), 'Pressure'),
+                         temperature_C=_optional_number(temp.text(), 'Temperature'),
+                         name=names['fluid'] or '(custom)')
+
+        def apply():
+            if self._apply(go, rebuild=True):
+                self.w.messages.add('Fluids and needle applied.', 'ok')
+        apply_b = _button('Apply', apply, primary=True, tip='Use these values for the session')
+        reset_b = _button('Reset', lambda: self.w.draft_changed(rebuild=True),
+                          tip='Back to the values in use')
+
+        def edited(kind=None):
+            if kind is not None:
+                names[kind] = None               # edited by hand: no longer the preset
+            pending.setText('Not applied yet.')
+            pending.setVisible(True)
+            apply_b.setEnabled(True)
+            reset_b.setEnabled(True)
+        apply_b.setEnabled(False)
+        reset_b.setEnabled(False)
+        for wdg in (od, tol, idd):
+            wdg.valueChanged.connect(lambda _: edited('needle'))
+        for wdg in (rin, rout, tin, tout):
+            wdg.valueChanged.connect(lambda _: edited('fluid'))
+        pres.textEdited.connect(lambda _: edited('fluid'))
+        temp.textEdited.connect(lambda _: edited('fluid'))
+
+        def fill(boxes, name, kind):
+            for s, v in boxes:
+                s.blockSignals(True)
+                s.setValue(float(v))
+                s.blockSignals(False)
+            names[kind] = name
+            edited()
+
+        def pick_needle(_i):
+            p = combo_n.currentData()
+            if p is not None:
+                fill(((od, p.values['od_mm']), (tol, p.values['od_tol_pct']),
+                      (idd, p.values.get('id_mm') or 0.0)), p.name, 'needle')
+        combo_n.currentIndexChanged.connect(pick_needle)
 
         def pick_fluid(_i):
             p = combo_f.currentData()
             if p is None:
                 return
             v = p.values
-            for s, x in ((rin, v['rho_in']), (rout, v['rho_out']),
-                         (tin, v['rho_in_tol_pct']), (tout, v['rho_out_tol_pct'])):
-                s.blockSignals(True)
-                s.setValue(float(x))
-                s.blockSignals(False)
             pres.setText('' if v.get('P_MPa') is None else f"{v['P_MPa']:g}")
             temp.setText('' if v.get('T_C') is None else f"{v['T_C']:g}")
-            set_fluids(p.name)
+            fill(((rin, v['rho_in']), (rout, v['rho_out']), (tin, v['rho_in_tol_pct']),
+                  (tout, v['rho_out_tol_pct'])), p.name, 'fluid')
         combo_f.currentIndexChanged.connect(pick_fluid)
-        lay.addWidget(note('Presets are shared with the Pendant window\'s Settings. The '
-                           'values are stored in the session when logging starts.'))
 
-    def _preset_buttons(self, kind, combo, values):
+        # Saving a preset applies its values too (the page is rebuilt from the draft).
+        needle_sec.widget(self._preset_buttons(
+            'needle', combo_n, lambda: dict(od_mm=od.value(), id_mm=id_value(idd),
+                                            od_tol_pct=tol.value()), go))
+        sec.widget(self._preset_buttons(
+            'fluid', combo_f,
+            lambda: dict(rho_in=rin.value(), rho_out=rout.value(), rho_in_tol_pct=tin.value(),
+                         rho_out_tol_pct=tout.value(),
+                         P_MPa=_optional_number(pres.text(), 'Pressure'),
+                         T_C=_optional_number(temp.text(), 'Temperature')), go))
+        lay.addWidget(pending)
+        lay.addWidget(actions(reset_b, apply_b))
+
+    def _preset_buttons(self, kind, combo, values, commit):
         """Save / Save as / Delete / Import for the presets of ``kind``
-        (the Pendant window's Settings dialog)."""
+        (the Pendant window's Settings dialog).  ``commit`` applies the
+        page's values to the draft before a save."""
         def chosen():
             return combo.currentData()
 
-        def save():
-            self.w.preset_save(kind, values(), chosen())
+        def save(preset):
+            try:
+                v = values()
+                commit()
+            except DraftError as e:
+                self.w.messages.add(str(e), 'warn')
+                return
+            self.w.preset_save(kind, v, preset)
 
-        def save_as():
-            self.w.preset_save(kind, values(), None)
-
-        sv = _button('Save', 'save', save, tip='Save these values into the chosen preset '
-                                               '(not for built-in presets)')
-        sa = _button('Save as...', 'save', save_as, tip='Save these values as a new preset')
-        de = _button('Delete', 'close', lambda: self.w.preset_delete(kind, chosen()),
+        sv = _button('Save', lambda: save(chosen()),
+                     tip='Save these values into the chosen preset (not for built-in presets)')
+        sa = _button('Save as...', lambda: save(None), tip='Save these values as a new preset')
+        de = _button('Delete', lambda: self.w.preset_delete(kind, chosen()),
                      tip='Delete the chosen preset (not for built-in presets)')
-        im = _button('Import...', 'open', self.w.preset_import,
+        im = _button('Import...', self.w.preset_import,
                      tip='Add a preset file (.json) to your presets')
 
         def update(_=None):
@@ -261,18 +289,14 @@ class DraftPages:
 
     def page_calibration(self, d, lay):
         sec = Section('Calibration curve')
-        if d.calibration_path:
-            sec.field('File', d.calibration_path)
-            sec.widget(note('Copied into the session folder when logging starts.'))
-        else:
-            sec.widget(note('Optional. Diffusivity (Yang) needs a gamma(c) curve; it can '
-                            'also be loaded after logging.'))
+        sec.field('File', Path(d.calibration_path).name if d.calibration_path else 'not loaded')
         lay.addWidget(sec)
-        row = [_button('Load calibration file...', 'calcurve', self.w.load_calibration)]
+        row = [_button('Load...', self.w.load_calibration,
+                       tip='Load a gamma(c) calibration file')]
         if d.calibration_path:
-            row.append(_button('Remove', 'close', lambda: self._apply(
+            row.insert(0, _button('Remove', lambda: self._apply(
                 lambda: setattr(d, 'calibration_path', None), rebuild=True)))
-        lay.addWidget(_row(*row))
+        lay.addWidget(actions(*row))
 
     # -- Yang from a single frame --------------------------------------------------------
     def page_yang(self, d, lay):
@@ -284,36 +308,32 @@ class DraftPages:
             return
         from core.ift_data import IFTDataError, load_ift_curve
         from gui.shell.analysis_pages import yang_search
-        lay.addWidget(callout(
-            'Single frame: the outline of this picture becomes the model (domain, mesh, FEM). '
-            'One picture gives one IFT value, so IFT against time for this drop comes from '
-            'a CSV, and the gamma(c) calibration from another.', 'info'))
         missing = dict(d.missing())
-        sec = Section('Inputs')
+        sec = Section('Inputs (single frame)')
         pic = [k for k in ('scale', 'baseline') if k in missing]
-        sec.field('Picture', 'ready (scale and baseline set)' if not pic
-                  else f"set the {' and the '.join(pic)} first")
-        if pic:
-            sec.widget(_row(*[_button(f"Go to {k.capitalize()}", 'next',
-                                      lambda k=k: self.w.select_node(k)) for k in pic]))
-        sec.field('gamma(c) calibration', Path(d.calibration_path).name
-                  if d.calibration_path else 'not loaded')
-        sec.widget(_row(_button('Load calibration...', 'calcurve', self.w.load_calibration),
-                        _button('Download template...', 'save',
-                                lambda: self.w.save_curve_template('calibration'))))
+        sec.field('Picture', None if pic else 'ready',
+                  buttons=[_button(f"Set {k}", lambda k=k: self.w.select_node(k),
+                                   tip=f"Go to {k.capitalize()}") for k in pic])
+        sec.field('gamma(c)', Path(d.calibration_path).name if d.calibration_path
+                  else 'not loaded',
+                  buttons=[_button('Load...', self.w.load_calibration,
+                                   tip='Load the gamma(c) calibration')])
         if d.ift_curve_path:
             try:
                 c = load_ift_curve(d.ift_curve_path)
-                info = (f"{Path(d.ift_curve_path).name}: {len(c['t'])} points, t = "
+                info = (f"{Path(d.ift_curve_path).name}: {len(c['t'])} points, "
                         f"{fmt(c['t'][0])} to {fmt(c['t'][-1])} s")
             except (IFTDataError, OSError) as e:
                 info = f"can't be read: {e}"
         else:
             info = 'not loaded'
-        sec.field('IFT against time', info)
-        sec.widget(_row(_button('Load IFT curve (CSV)...', 'series', self.w.load_ift_curve),
-                        _button('Download template...', 'save',
-                                lambda: self.w.save_curve_template('ift'))))
+        sec.field('IFT(t)', info, buttons=[_button('Load...', self.w.load_ift_curve,
+                                                   tip='Load IFT against time (CSV)')])
+        sec.field('Templates', None, buttons=[
+            _button('gamma(c)', lambda: self.w.save_curve_template('calibration'),
+                    tip='Save a gamma(c) template file'),
+            _button('IFT(t)', lambda: self.w.save_curve_template('ift'),
+                    tip='Save an IFT-against-time template file')])
         lay.addWidget(sec)
         search = yang_search({}, lay)
         ready = not pic and bool(d.calibration_path and d.ift_curve_path)
@@ -325,26 +345,19 @@ class DraftPages:
                 self.w.messages.add(str(e), 'warn')
                 return
             self.w.continue_single_frame(kw)
-        b = _button('Continue with single frame', 'compute', go, primary=True,
-                    tip='Saves the session (asks where), then builds the domain, mesh and FEM '
-                        'from this picture and fits D and k to the IFT curve')
+        b = _button('Run...', go, primary=True,
+                    tip='Saves the session (asks where), then builds the model from this '
+                        'picture and fits D and k to the IFT curve')
         b.setEnabled(ready and not self.w.job_running())
-        lay.addWidget(_row(b))
+        lay.addWidget(actions(b))
 
     # -- single-frame IFT ----------------------------------------------------------------
     def page_frame_ift(self, d, lay):
-        sec = Section('Reference frame')
-        sec.widget(note('Measures the interfacial tension of the reference frame with the '
-                        'set-up above, as the old Static mode did. Nothing is saved; after '
-                        'logging, any logged frame can be measured here.'))
-        lay.addWidget(sec)
         ready = d.scale is not None and d.baseline is not None
-        b = _button('Measure IFT', 'drop', self.w.measure_reference, primary=True,
+        b = _button('Measure IFT', self.w.measure_reference, primary=True,
                     tip='Fit the drop shape of the reference frame')
         b.setEnabled(ready and not self.w.job_running())
-        lay.addWidget(_row(b))
-        if not ready:
-            lay.addWidget(note('Set the scale and the baseline first.'))
+        lay.addWidget(actions(b))
         if d.preview:
             lay.addWidget(ift_result_section(d.preview, 'Result: reference frame'))
 
@@ -366,37 +379,27 @@ class DraftPages:
             sec = Section('Drop formed at')
             t0 = _spin(d.sampling.get('t_start_s', 0.0), 0, max(s['duration_s'] - 1e-3, 0), 3,
                        1.0 / s['fps'], ' s')
+            t0.setToolTip('Frames before this are not logged; times count from here')
             sec.form.addRow('Time in the video', t0)
-            sec.widget(note('Frames before this are not logged; times in the log are '
-                            'counted from here. The frame at this time is the one you '
-                            'prepare on.'))
             t0.valueChanged.connect(lambda v: self._apply(lambda: d.set_t_start(v)))
             lay.addWidget(sec)
         elif d.kind == 'camera':
-            sec = Section('Reference frame')
-            sec.widget(note('The live picture shows on the Frame tab. Capture the frame '
-                            'to prepare on (crop, scale, baseline); logging uses the '
-                            'same settings for every frame.'))
-            sec.widget(_button('Capture reference frame', 'camera', self.w.capture_reference,
-                               primary=True))
-            lay.addWidget(sec)
+            lay.addWidget(actions(_button('Capture reference frame', self.w.capture_reference,
+                                          primary=True)))
 
     def page_crop(self, d, lay):
         sec = Section('Crop')
         box = d.crop_box()
         sec.field('Region', f"x {box[0]}, y {box[1]}, {box[2]} x {box[3]} px" if box
-                  else 'Whole frame')
-        sec.widget(note('Crop to the drop and needle: smaller frames are faster to fit '
-                        'and to store. Changing the crop clears the baseline.'))
+                  else 'whole frame')
         lay.addWidget(sec)
-        row = [_button('Draw crop box', 'crop', lambda: self.w.pick(
+        row = [_button('Draw crop box', lambda: self.w.pick(
             'rect', 'Drag a box around the needle and drop.',
             lambda x, y, w, h: self._apply(lambda: d.set_crop(x, y, w, h), rebuild=True)),
-            primary=True)]
+            primary=True, tip='Changing the crop clears the baseline')]
         if box:
-            row.append(_button('Remove crop', 'close',
-                               lambda: self._apply(d.clear_crop, rebuild=True)))
-        lay.addWidget(_row(*row))
+            row.insert(0, _button('Remove crop', lambda: self._apply(d.clear_crop, rebuild=True)))
+        lay.addWidget(actions(*row))
 
     def page_threshold(self, d, lay):
         sec = Section('Threshold')
@@ -417,10 +420,7 @@ class DraftPages:
             s.setEnabled(level is not None)
         sec.widget(auto)
         sec.widget(fixed)
-        sec.widget(_row(slider, spin, stretch=False))
-        sec.widget(note('Frames are stored before the threshold, so it can be changed '
-                        'later and the log rebuilt. Tick "Show thresholded" on the Frame '
-                        'tab to see what the fit sees.'))
+        sec.widget(_row(slider, spin, uniform=False))
         lay.addWidget(sec)
 
         def apply_level():
@@ -443,19 +443,18 @@ class DraftPages:
             sec.field('Scale', fmt(d.scale['pixel_to_m'] * 1e6, 6), 'um/px', result=True)
             sec.field('From', f"{d.scale.get('method')}: {d.scale.get('reference')}")
         else:
-            sec.widget(note('Not calibrated yet.'))
+            sec.field('Scale', 'not set')
         lay.addWidget(sec)
 
         sec = Section('Calibrate')
         method = QComboBox()
-        method.addItem('Needle width: draw a box around the needle', 'needle')
-        method.addItem('Reference sphere: draw a box around it', 'sphere')
-        method.addItem('Known length: click its two ends', 'points')
+        method.addItem('Needle width', 'needle')
+        method.addItem('Reference sphere', 'sphere')
+        method.addItem('Known length', 'points')
         method.addItem('Enter the scale', 'direct')
         method.setCurrentIndex(max(method.findData(self.w.scale_method), 0))
         sec.form.addRow('Method', method)
         size = _spin(d.needle['od_mm'], 0.0001, 1000, 4, 0.01, ' mm')
-        size.setToolTip('Real size of the reference; the needle diameter by default')
         sec.form.addRow('Reference size', size)
         direct = _spin((d.scale or {}).get('pixel_to_m', 1e-5) * 1e6, 0.001, 10000, 4, 0.1,
                        ' um/px')
@@ -500,10 +499,10 @@ class DraftPages:
                     self._apply(do, rebuild=True)
                 self.w.pick('points2', 'Click the two ends of the known length.', clicked)
 
-        go = _button('Apply', 'ruler', go_clicked, primary=True)
+        go = _button('Apply', go_clicked, primary=True)
         method.currentIndexChanged.connect(show_rows)
         show_rows()
-        lay.addWidget(_row(go))
+        lay.addWidget(actions(go))
 
     def page_baseline(self, d, lay):
         sec = Section('Baseline')
@@ -511,17 +510,14 @@ class DraftPages:
             sec.field('Row', fmt(d.baseline['y_px'], 6), 'px', result=True)
             sec.field('Method', d.baseline.get('method'))
         else:
-            sec.widget(note('Not set yet.'))
-        sec.widget(note('The row where the drop leaves the needle. Only the outline below '
-                        'it is fitted. Automatic search looks for where the outline first '
-                        'widens beyond the needle.'))
+            sec.field('Row', 'not set')
         lay.addWidget(sec)
-        lay.addWidget(_row(
-            _button('Find automatically', 'baseline',
-                    lambda: self._apply(d.auto_baseline, rebuild=True), primary=True),
-            _button('Click on the image', 'baseline', lambda: self.w.pick(
+        lay.addWidget(actions(
+            _button('Click on the image', lambda: self.w.pick(
                 'hline', 'Click the row where the drop leaves the needle.',
-                lambda y: self._apply(lambda: d.set_baseline(y, 'manual'), rebuild=True)))))
+                lambda y: self._apply(lambda: d.set_baseline(y, 'manual'), rebuild=True))),
+            _button('Find automatically', lambda: self._apply(d.auto_baseline, rebuild=True),
+                    primary=True)))
 
     # -- logger -------------------------------------------------------------------------
     def page_logger(self, d, lay):
@@ -539,18 +535,15 @@ class DraftPages:
             if d.kind == 'video':
                 mins = max(1, round(p['n'] * SECONDS_PER_FRAME / 60))
                 plan_label.setText(
-                    f"{p['n']} of {d.source['n_frames']} frames will be logged (t = 0 to "
-                    f"{p['t_last']:.1f} s; steps {p['min_step']:.3g} to {p['max_step']:.3g} s). "
-                    f"Roughly {mins} min, in the background.")
+                    f"{p['n']} of {d.source['n_frames']} frames, t = 0 to {p['t_last']:.1f} s "
+                    f"(steps {p['min_step']:.3g} to {p['max_step']:.3g} s), about {mins} min.")
             elif d.kind == 'camera':
                 plan_label.setText(
                     f"A frame every {p['interval_s']:g} s" +
                     (f" for {p['duration_s'] / 60:g} min ({p['n']} frames)." if p['duration_s']
-                     else " until you press Stop.") +
-                    " If a fit takes longer than the interval, the next frame is taken "
-                    "as soon as it finishes; the log records the real times.")
+                     else " until stopped."))
             else:
-                plan_label.setText('The image is logged as one frame at t = 0.')
+                plan_label.setText('One frame at t = 0.')
 
         def changed():
             self._apply(lambda: None)
@@ -637,8 +630,6 @@ class DraftPages:
                          if lst.item(i).checkState() == Qt.CheckState.Checked]
         lst.itemChanged.connect(cols_changed)
         sec.widget(lst)
-        sec.widget(note('One fit gives every column, so leaving one out saves almost no '
-                        'time. A column left out can be added later by rebuilding the log.'))
         lay.addWidget(sec)
 
         sec = Section('Check on the reference frame')
@@ -651,22 +642,22 @@ class DraftPages:
             sec.field('Volume', fmt(r['volume_uL']), 'uL')
             sec.field('Quality checks', 'passed' if r['qc_pass'] else 'failed (see Messages)')
         elif d.preview:
-            sec.widget(callout(f"The fit failed: {d.preview.get('error', '')}"))
+            sec.field('Fit', f"failed: {d.preview.get('error', '')}")
         else:
-            sec.widget(note('Fit the reference frame once to see that the settings work '
-                            '(this is what the old Static mode did).'))
-        sec.widget(_button('Measure reference frame', 'drop', self.w.measure_reference))
+            sec.field('Fit', 'not measured yet')
+        sec.widget(_row(_button('Measure reference frame', self.w.measure_reference,
+                                tip='Fit the reference frame once to check the set-up')))
         lay.addWidget(sec)
 
         missing = d.missing()
         if missing:
-            lay.addWidget(callout('Before logging: ' + ' '.join(m for _, m in missing)))
-        start = _button('Start logging...', 'compute', self.w.start_logging, primary=True,
+            lay.addWidget(note('Before logging: ' + ' '.join(m for _, m in missing)))
+        start = _button('Start logging...', self.w.start_logging, primary=True,
                         tip='Choose where the session folder goes, then log the frames')
         start.setEnabled(not missing and not self.w.job_running())
-        lay.addWidget(_row(start))
+        lay.addWidget(actions(start))
 
     # -- everything after logging --------------------------------------------------------
     def page_analyses(self, d, lay):
-        lay.addWidget(note('The analyses run on the logged frames. Log the frames first.'))
+        lay.addWidget(note('Available once the frames are logged.'))
         self.w.settings._children_page('analyses', lay)

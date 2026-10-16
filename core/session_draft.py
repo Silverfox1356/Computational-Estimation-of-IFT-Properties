@@ -349,9 +349,9 @@ class SessionDraft:
         """[(node key, message)] in tree order; empty when logging can start."""
         out = []
         if self.scale is None:
-            out.append(('scale', 'Calibrate the scale (needle width or a known length).'))
+            out.append(('scale', 'Calibrate the scale.'))
         if self.baseline is None:
-            out.append(('baseline', 'Set the baseline at the needle tip.'))
+            out.append(('baseline', 'Set the baseline.'))
         try:
             self.sample_plan()
         except DraftError as e:
