@@ -617,11 +617,34 @@ class AnalysisPages:
         sec.form.setRowVisible(dt, fixed.isChecked())
         lay.addWidget(sec)
 
+        from core.analyses import (SIM_DEFAULT_SNAPSHOTS, SIM_MAX_SNAPSHOTS,
+                                   SIM_SNAPSHOT_SPACINGS)
+        sec = Section('Snapshots')
+        n_snap = QSpinBox()
+        n_snap.setRange(1, SIM_MAX_SNAPSHOTS)
+        n_snap.setValue(int(st.get('n_snapshots') or SIM_DEFAULT_SNAPSHOTS))
+        n_snap.setToolTip('How many concentration fields are stored over the run')
+        sec.form.addRow('Number', n_snap)
+        spacing = QComboBox()
+        for key, label in SIM_SNAPSHOT_SPACINGS.items():
+            spacing.addItem(label, key)
+        spacing.setCurrentIndex(max(0, spacing.findData(st.get('snapshot_spacing', 'early'))))
+        spacing.setToolTip('Dense early: more snapshots at the start, where the '
+                           'concentration changes fastest')
+        sec.form.addRow('Spacing', spacing)
+        times = QLineEdit(', '.join(f"{x:g}" for x in st.get('snapshot_times') or ()))
+        times.setPlaceholderText('e.g. 60, 600, 1200')
+        times.setToolTip('Times (s) that always get a snapshot, separated by commas')
+        sec.form.addRow('Also at (s)', times)
+        lay.addWidget(sec)
+
         def run():
             try:
                 kw = dict(D=_sci(d_e.text(), 'D'), k=_sci(k_e.text(), 'k'),
                           duration_s=dur.value(), frame_index=frame.currentData(),
-                          dt_s=dt.value() if fixed.isChecked() else None)
+                          dt_s=dt.value() if fixed.isChecked() else None,
+                          n_snapshots=n_snap.value(), snapshot_spacing=spacing.currentData(),
+                          snapshot_times=_parse_list(times.text(), 'Snapshot times'))
             except ValueError as e:
                 self.w.messages.add(str(e), 'warn')
                 return
@@ -636,6 +659,7 @@ class AnalysisPages:
         sec.field('k', fmt(st['k'], 4), 'm/s')
         sec.field('kD (Biot number)', fmt(r['kD'], 4))
         sec.field('Simulated', f"{fmt(r['simulated_s'], 5)} s in {r['n_steps']} steps")
+        sec.field('Snapshots stored', str(len(doc['data'].get('snapshots') or ())))
         sec.field('Final Cs', fmt(r['Cs_final'], 4), 'c/c_sat', result=True)
         if r.get('gamma_final') is not None:
             sec.field('Final IFT', fmt(r['gamma_final'], 4), 'mN/m', result=True)

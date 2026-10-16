@@ -56,7 +56,9 @@ class CameraHandler:
 
         elif self.camera_type == "Basler":
             if not BASLER_AVAILABLE:
-                raise Exception("The 'pypylon' library is not installed.")
+                raise Exception("Basler cameras need the 'pypylon' library, which is not installed.\n\n"
+                                "Install it with:  pip install pypylon\n"
+                                "or choose 'Webcam' instead.")
 
             tl_factory = pylon.TlFactory.GetInstance()
             devices = tl_factory.EnumerateDevices()

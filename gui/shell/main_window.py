@@ -24,6 +24,7 @@ restores the default.
 """
 
 import datetime
+import importlib.util
 import re
 import shutil
 import threading
@@ -161,6 +162,7 @@ class StudioWindow(QMainWindow):
         self._make_actions()
         self._make_ribbon()
         self.graphics = GraphicsArea()
+        self.graphics.results['simulation'].compute_requested.connect(self.simulation_at)
         self._make_panels()
         self._make_statusbar()
         self._wire()
@@ -603,8 +605,10 @@ class StudioWindow(QMainWindow):
         try:
             if kind == 'camera':
                 if camera_type is None:
+                    # Without pypylon a Basler camera cannot open, so offer the webcam first.
+                    first = 0 if importlib.util.find_spec('pypylon') else CAMERA_TYPES.index('Webcam')
                     camera_type, ok = QInputDialog.getItem(
-                        self, 'New session from camera', 'Camera', CAMERA_TYPES, 0, False)
+                        self, 'New session from camera', 'Camera', CAMERA_TYPES, first, False)
                     if not ok:
                         return False
                 draft = self._start_camera(camera_type)
@@ -1184,11 +1188,33 @@ class StudioWindow(QMainWindow):
 
         self.run_job('Rebuilding the frame log', task, done)
 
-    def run_analysis(self, name, **settings):
-        """Run a stored analysis (core.analyses) on the open session."""
+    def simulation_at(self, t):
+        """Run the stored simulation again with the same settings, also
+        storing the concentration at time t (s)."""
+        view = self.graphics.results['simulation']
+        if self.job_running():
+            view.compute_ended()
+            self.messages.add('Another task is running; try again when it ends.', 'warn')
+            return
+        try:
+            st = self.folder.load_analysis('simulation')['data']['settings']
+        except (AttributeError, SessionError, KeyError, TypeError):
+            view.compute_ended()
+            return
+        keep = ('D', 'k', 'duration_s', 'dt_s', 'frame_index', 'source', 'n_snapshots',
+                'snapshot_spacing')
+        self.run_analysis('simulation', **{k: st[k] for k in keep if k in st},
+                          snapshot_times=list(st.get('snapshot_times') or ()) + [t],
+                          on_end=view.compute_ended)
+
+    def run_analysis(self, name, on_end=None, **settings):
+        """Run a stored analysis (core.analyses) on the open session;
+        ``on_end`` is called when the job ends, however it ends."""
         from core.analyses import LABELS, RUNNERS
         folder = self.folder
         if folder is None:
+            if on_end:
+                on_end()
             return
 
         def task(progress, is_cancelled):
@@ -1214,6 +1240,8 @@ class StudioWindow(QMainWindow):
         def finally_():
             if self.folder is folder:
                 self.select_node(name)
+            if on_end:
+                on_end()
 
         self.run_job(f"Running the {LABELS[name].lower()}", task, done, on_finally=finally_)
 

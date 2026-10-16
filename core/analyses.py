@@ -49,7 +49,11 @@ LABELS = dict(swelling='Swelling check', bagalkot='Diffusivity (Bagalkot)',
 SIM_DEFAULT_D = 1e-9            # m2/s
 SIM_DEFAULT_K = 1e-5            # m/s
 SIM_DEFAULT_DURATION_S = 600.0  # the Pendant window's 10 min
-SIM_SNAPSHOT_FRACTIONS = (0.01, 0.03, 0.08, 0.15, 0.3, 0.5, 0.75, 1.0)
+# Concentration snapshots stored per run: how many, and how they are spread.
+SIM_DEFAULT_SNAPSHOTS = 8
+SIM_MAX_SNAPSHOTS = 100
+SIM_MAX_SNAPSHOT_TIMES = 50     # extra times the user asks for
+SIM_SNAPSHOT_SPACINGS = dict(early='Dense early', even='Even')
 SIM_LOG_LINES = 500             # step-log lines kept (head and tail)
 # Yang's kD grid search (his Fig 7a): defaults and limits.  The D axis is his
 # 0.001-10 x 1e-9 m2/s; the kD set is his 0.1, 0.5, 1, 2, 3, 4, 5.
@@ -395,15 +399,51 @@ def simulation_defaults(folder):
         return SIM_DEFAULT_D, SIM_DEFAULT_K, SIM_DEFAULT_DURATION_S, None
 
 
-def _snapshot_steps(step_times, fractions=SIM_SNAPSHOT_FRACTIONS):
-    """1-based step numbers closest to each fraction of the run."""
+def snapshot_fractions(n, spacing='early'):
+    """n fractions of the run ending at 1: 'early' = geometric from 1 %
+    (the concentration changes fastest at first), 'even' = equal steps."""
+    n = int(n)
+    if n <= 1:
+        return np.array([1.0])
+    if spacing == 'even':
+        return np.arange(1, n + 1) / n
+    return np.geomspace(0.01, 1.0, n)
+
+
+def _snapshot_steps(step_times, n=SIM_DEFAULT_SNAPSHOTS, spacing='early', times=()):
+    """1-based step numbers closest to each fraction of the run and to each
+    of ``times`` (s).  Close fractions can share a step, so a short run may
+    give fewer than n."""
     t = np.asarray(step_times, float)
-    return sorted({int(np.argmin(np.abs(t - f * t[-1]))) + 1 for f in fractions})
+    targets = [f * t[-1] for f in snapshot_fractions(n, spacing)] + [float(x) for x in times]
+    return sorted({int(np.argmin(np.abs(t - x))) + 1 for x in targets})
+
+
+def _snapshot_settings(n_snapshots, spacing, times, duration_s):
+    n = int(n_snapshots)
+    if not 1 <= n <= SIM_MAX_SNAPSHOTS:
+        raise AnalysisError(f"the number of snapshots must be 1 to {SIM_MAX_SNAPSHOTS}")
+    if spacing not in SIM_SNAPSHOT_SPACINGS:
+        raise AnalysisError(f"unknown snapshot spacing {spacing!r}")
+    times = sorted({float(x) for x in (times or ())})
+    if len(times) > SIM_MAX_SNAPSHOT_TIMES:
+        raise AnalysisError(f"at most {SIM_MAX_SNAPSHOT_TIMES} extra snapshot times")
+    for x in times:
+        if not (math.isfinite(x) and 0 < x <= duration_s):
+            raise AnalysisError(f"snapshot time {x:g} s is outside the run (0 to "
+                                f"{duration_s:g} s)")
+    return n, spacing, times
 
 
 def run_simulation(folder, D=None, k=None, duration_s=None, dt_s=None, frame_index=None,
-                   model=None, source='manual', progress=None, is_cancelled=None):
+                   model=None, source='manual', n_snapshots=SIM_DEFAULT_SNAPSHOTS,
+                   snapshot_spacing='early', snapshot_times=(), progress=None,
+                   is_cancelled=None):
     """Forward diffusion simulation for (D, k) on the outline of one frame.
+
+    The concentration field is stored at ``n_snapshots`` times spread over
+    the run (``snapshot_spacing`` 'early' or 'even') and at the step nearest
+    each of ``snapshot_times`` (s).
 
     ``dt_s`` None = graded steps (fine at first, as the Yang fit uses);
     a number = uniform steps of that size with theta = 0.7, as the Pendant
@@ -428,6 +468,8 @@ def run_simulation(folder, D=None, k=None, duration_s=None, dt_s=None, frame_ind
         if duration_s / dt_s > 2_000_000:
             raise AnalysisError(f"{duration_s / dt_s:.0f} steps of {dt_s:g} s is too many; "
                                 f"use a larger time step or automatic steps")
+    n_snapshots, snapshot_spacing, snapshot_times = _snapshot_settings(
+        n_snapshots, snapshot_spacing, snapshot_times, duration_s)
     calibration = None
     if folder.calibration_path and folder.calibration_path.is_file():
         calibration = load_session_calibration(folder)
@@ -454,7 +496,9 @@ def run_simulation(folder, D=None, k=None, duration_s=None, dt_s=None, frame_ind
                               theta=0.7, dtau=dt_s if dt_s is not None else 0.01,
                               total_time=duration_s,
                               stepping='uniform' if dt_s is not None else 'graded',
-                              snapshot_steps=_snapshot_steps(step_t), progress_cb=on_step,
+                              snapshot_steps=_snapshot_steps(step_t, n_snapshots,
+                                                             snapshot_spacing, snapshot_times),
+                              progress_cb=on_step,
                               calibration=calibration, verbose=False)
     except FrameSeriesCancelled:
         raise
@@ -471,7 +515,9 @@ def run_simulation(folder, D=None, k=None, duration_s=None, dt_s=None, frame_ind
     data = dict(settings=dict(D=D, k=k, duration_s=duration_s, dt_s=dt_s,
                               stepping='uniform' if dt_s is not None else 'graded',
                               frame_index=int(model['frame']['frame_index']), source=source,
-                              needle_id_mm=folder.session.needle.get('id_mm')),
+                              needle_id_mm=folder.session.needle.get('id_mm'),
+                              n_snapshots=n_snapshots, snapshot_spacing=snapshot_spacing,
+                              snapshot_times=snapshot_times),
                 result=dict(kD=float(sim['kD']), n_steps=int(sim['n_steps']),
                             simulated_s=float(sim['actual_time']), Cs_final=float(Cs[-1]),
                             gamma_final=None if gamma is None else float(gamma[-1]),

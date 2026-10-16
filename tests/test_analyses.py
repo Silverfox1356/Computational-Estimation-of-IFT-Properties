@@ -331,6 +331,25 @@ def simulation_checks(tmp, one):
           abs(g['result']['Cs_final'] - r['Cs_final']) < 0.01,
           f"{g['result']['n_steps']} graded steps, Cs {g['result']['Cs_final']:.4f}")
     check("simulation listed as available", one.availability()['simulation'] == (True, ''))
+    check("snapshot time outside the run refused",
+          raises(lambda: A.run_simulation(one, duration_s=300, snapshot_times=[400])))
+    check("too many snapshots refused",
+          raises(lambda: A.run_simulation(one, duration_s=300, n_snapshots=1000)))
+    e = A.run_simulation(one, D=2e-9, k=3e-5, duration_s=300, dt_s=0.5, n_snapshots=20,
+                         snapshot_spacing='even', snapshot_times=[123])
+    ts = [s['t'] for s in e['snapshots']]
+    check("20 evenly spaced snapshots plus a typed time", len(ts) == 21
+          and any(abs(x - 123) < 1e-9 for x in ts)
+          and all(any(abs(x - 15 * i) < 1e-9 for x in ts) for i in range(1, 21)),
+          f"{len(ts)} snapshots")
+    check("snapshot settings stored", e['settings']['n_snapshots'] == 20
+          and e['settings']['snapshot_spacing'] == 'even'
+          and e['settings']['snapshot_times'] == [123.0])
+    f = A.run_simulation(one, D=2e-9, k=3e-5, duration_s=300, n_snapshots=12)
+    tf = np.array([s['t'] for s in f['snapshots']])
+    check("dense-early spacing: more snapshots in the first tenth", 1 < len(tf) <= 12
+          and (tf < 30).sum() > len(tf) / 3 and abs(tf[-1] - 300) < 1e-6,
+          f"{len(tf)} snapshots, {(tf < 30).sum()} before 30 s")
 
 
 if __name__ == "__main__":

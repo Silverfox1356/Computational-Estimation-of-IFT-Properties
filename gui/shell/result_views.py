@@ -23,8 +23,8 @@ not here; the line under the plots gives the numbers only.
 
 import numpy as np
 import pyqtgraph as pg
-from PyQt6.QtCore import Qt
-from PyQt6.QtWidgets import (QFrame, QGridLayout, QHBoxLayout, QLabel, QListWidget,
+from PyQt6.QtCore import Qt, pyqtSignal
+from PyQt6.QtWidgets import (QFrame, QGridLayout, QHBoxLayout, QLabel, QLineEdit, QListWidget,
                              QListWidgetItem, QPlainTextEdit, QPushButton, QScrollArea, QSlider,
                              QToolButton, QVBoxLayout, QWidget)
 
@@ -461,11 +461,18 @@ class ModelView(_View):
 class SimulationView(_View):
     """The forward simulation (the Pendant window's Simulation window):
     concentration in the drop at the stored times (slider), the interface
-    concentration Cs(t), gamma(t) against the measured IFT, and diagnostics."""
+    concentration Cs(t), gamma(t) against the measured IFT, and diagnostics.
+
+    A typed time shows the snapshot at the solver step nearest to it; when
+    none is stored there, "Compute" asks for a re-run that stores it."""
+
+    compute_requested = pyqtSignal(float)       # time (s) to add as a snapshot
 
     def __init__(self, parent=None):
         super().__init__(parent)
         self.data = None
+        self._asked_t = None                    # typed time with no stored snapshot
+        self._want_t = None                     # time asked for, shown after the re-run
         self.canvas = None                      # matplotlib, made on first use
         self.field_box = QWidget()
         self.field_lay = QVBoxLayout(self.field_box)
@@ -478,6 +485,26 @@ class SimulationView(_View):
         row.addWidget(QLabel('Snapshot'))
         row.addWidget(self.slider, 1)
         row.addWidget(self.slider_label)
+        self.field_lay.addLayout(row)
+        row = QHBoxLayout()
+        row.addWidget(QLabel('Time (s)'))
+        self.time_edit = QLineEdit()
+        self.time_edit.setPlaceholderText('e.g. 1200')
+        self.time_edit.setToolTip('Show the concentration at this time')
+        self.time_edit.setMaximumWidth(110)
+        self.time_edit.returnPressed.connect(self.go_to_time)
+        row.addWidget(self.time_edit)
+        self.show_btn = QPushButton('Show')
+        self.show_btn.clicked.connect(self.go_to_time)
+        row.addWidget(self.show_btn)
+        self.compute_btn = QPushButton('Compute')
+        self.compute_btn.setToolTip('Run the simulation again, also storing this time')
+        self.compute_btn.clicked.connect(self._compute)
+        self.compute_btn.hide()
+        row.addWidget(self.compute_btn)
+        self.time_info = QLabel('')
+        self.time_info.setObjectName('Note')
+        row.addWidget(self.time_info, 1)
         self.field_lay.addLayout(row)
         self.cs = make_plot('Interface concentration', 'Time (s)', 'Cs (c / c_sat)')
         self.gamma = make_plot('Interfacial tension', 'Time (s)', 'IFT (mN/m)')
@@ -511,7 +538,13 @@ class SimulationView(_View):
         self.slider.setRange(0, max(0, len(snaps) - 1))
         self.slider.setValue(max(0, len(snaps) - 1))
         self.slider.blockSignals(False)
+        self.compute_btn.hide()
+        self.time_info.setText('')
         self._draw_field()
+        if self._want_t is not None:
+            t, self._want_t = self._want_t, None
+            self.time_edit.setText(f"{t:g}")
+            self.go_to_time()
         r, st, c = data['result'], data['settings'], data['curve']
         t = _arr(c['t'])
         self.cs.clear()
@@ -538,6 +571,48 @@ class SimulationView(_View):
             f"Final Cs {fmt(r['Cs_final'], 4)}; C from {fmt(r['C_min'], 3)} to "
             f"{fmt(r['C_max'], 3)} over the run.{g}")
         self.log.setPlainText('\n'.join(data.get('diagnostics') or []))
+
+    def go_to_time(self):
+        """Show the snapshot at the solver step nearest the typed time."""
+        self.compute_btn.hide()
+        if self.data is None:
+            return
+        try:
+            t = float(self.time_edit.text().strip().replace(',', '.'))
+        except ValueError:
+            self.time_info.setText('Type a time in seconds.')
+            return
+        steps = _arr(self.data['curve']['t'])
+        snaps = self.data['snapshots']
+        if not len(steps) or not snaps:
+            self.time_info.setText('No snapshots stored.')
+            return
+        if not (np.isfinite(t) and 0 < t <= steps[-1] * (1 + 1e-9)):
+            self.time_info.setText(f"Outside the run: 0 to {fmt(steps[-1], 5)} s.")
+            return
+        ts = steps[np.argmin(np.abs(steps - t))]          # the step a re-run would store
+        snap_t = np.array([s['t'] for s in snaps], float)
+        j = int(np.argmin(np.abs(snap_t - ts)))
+        self.slider.setValue(j)                            # nearest stored one meanwhile
+        if abs(snap_t[j] - ts) <= 1e-9 * max(1.0, ts):
+            self.time_info.setText('' if abs(ts - t) <= 1e-6 * max(1.0, t) else
+                                   f"Nearest solver step: {fmt(ts, 5)} s.")
+            return
+        self._asked_t = t
+        self.time_info.setText(f"Not stored; showing {fmt(snap_t[j], 5)} s.")
+        self.compute_btn.show()
+
+    def compute_ended(self):
+        """The re-run ended; if it stored nothing new (failed, stopped), say so."""
+        if self._want_t is not None:
+            self._want_t = None
+            self.time_info.setText('Not computed.')
+
+    def _compute(self):
+        self.compute_btn.hide()
+        self.time_info.setText('Computing...')
+        self._want_t = self._asked_t
+        self.compute_requested.emit(self._asked_t)
 
     def _draw_field(self, *_):
         if self.data is None or self.canvas is None:

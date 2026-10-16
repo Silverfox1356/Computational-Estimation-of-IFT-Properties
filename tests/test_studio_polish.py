@@ -11,6 +11,7 @@ Drop Analysis Studio: the settings-page polish (2026-10-16).
     9  the Yang Fit tab shows no warnings; a Warnings section lists them
     10 the frame rate can be typed as seconds per frame or frames per second
     11 the Log Plot shows IFT and volume on one graph (two axes) by default
+    12 Simulation: a typed time shows its snapshot, or offers to compute it
 
 Plain script (project convention — no pytest):
     conda run -n ift python tests/test_studio_polish.py      (a few seconds)
@@ -194,6 +195,50 @@ def run(tmp):
           and not lp.plot.plotItem.getAxis('right').isVisible())
     lp.set_log(SimpleNamespace(columns=['time_s', 'volume_uL'], rows=rows))
     check("no IFT: no combined choice", lp.combo.findData(LogPlot.BOTH) < 0)
+
+    print("── 12: Simulation snapshot at a typed time ──")
+    from gui.shell.result_views import SimulationView
+    steps = list(np.arange(1, 101) * 10.0)              # 100 steps of 10 s
+    stored = (100.0, 500.0, 1000.0)
+    P = [[0, 0], [1e-3, 0], [0, 1e-3], [1e-3, 1e-3]]
+    sim = dict(snapshots=[dict(step=int(t // 10), t=t, C=[t / 1000] * 4) for t in stored],
+               model=dict(points=P, triangles=[[0, 1, 2], [1, 3, 2]]),
+               curve=dict(t=steps, Cs=[0.5] * 100, gamma=None), measured=None,
+               settings=dict(D=1e-9, k=1e-5, source='manual', stepping='graded'),
+               result=dict(kD=1.0, simulated_s=1000.0, n_steps=100, Cs_final=0.9,
+                           C_min=0.0, C_max=1.0, gamma_final=None), diagnostics=[])
+    sv = SimulationView()
+    sv.set_data(sim)
+    asked = []
+    sv.compute_requested.connect(asked.append)
+    sv.time_edit.setText('500')
+    sv.go_to_time()
+    check("a stored time is shown", sv.slider.value() == 1 and sv.compute_btn.isHidden()
+          and sv.time_info.text() == '')
+    sv.time_edit.setText('503')
+    sv.go_to_time()
+    check("a time near a stored step snaps to it", sv.slider.value() == 1
+          and 'Nearest solver step' in sv.time_info.text())
+    sv.time_edit.setText('720')
+    sv.go_to_time()
+    check("an unstored time shows the nearest and offers Compute", sv.slider.value() == 1
+          and not sv.compute_btn.isHidden() and 'Not stored' in sv.time_info.text())
+    sv.compute_btn.click()
+    check("Compute asks for a re-run at that time", asked == [720.0])
+    sim2 = dict(sim, snapshots=sorted(sim['snapshots'] + [dict(step=72, t=720.0, C=[0.7] * 4)],
+                                      key=lambda s: s['t']))
+    sv.set_data(sim2)
+    check("after the re-run the asked time is shown", sv.slider.value() == 2
+          and sv.time_edit.text() == '720' and sv.compute_btn.isHidden())
+    sv.time_edit.setText('5000')
+    sv.go_to_time()
+    check("a time outside the run is refused", 'Outside the run' in sv.time_info.text())
+    sv.time_edit.setText('720')
+    sv.go_to_time()
+    sv._asked_t = 300.0
+    sv.compute_btn.click()
+    sv.compute_ended()
+    check("a failed re-run says so", sv.time_info.text() == 'Not computed.')
     w.discard_draft()
     w.close()
 
