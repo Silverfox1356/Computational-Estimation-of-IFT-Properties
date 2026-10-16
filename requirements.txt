@@ -6,3 +6,4 @@ scipy
 PyQt6
 gmsh
 matplotlib
+pypylon
