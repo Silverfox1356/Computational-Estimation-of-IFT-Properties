@@ -27,7 +27,6 @@ import datetime
 import importlib.util
 import re
 import shutil
-import threading
 import time
 from pathlib import Path
 
@@ -151,8 +150,8 @@ class StudioWindow(QMainWindow):
         self.statuses = nodes.node_statuses(None)
         self.job = None
         self._pick_cb = None
-        self._latest = None
-        self._latest_lock = threading.Lock()
+        self.grabber = None                   # FrameGrabber: camera frames, own thread
+        self._shown = 0                       # number of the last live frame drawn
         self.frame_fit = None                 # last Single-Frame IFT: dict(folder, label, ...)
         self.draft_pages = DraftPages(self)
         self.analysis_pages = AnalysisPages(self)
@@ -647,53 +646,61 @@ class StudioWindow(QMainWindow):
         self.select_node('session')
 
     def _start_camera(self, camera_type):
+        from core.camera_handler import FrameGrabber
         cam = self.camera_factory(camera_type)
         cam.start()
         frame = None
-        for _ in range(50):
+        deadline = time.monotonic() + 6.0        # one Basler grab can take 5 s
+        while frame is None and time.monotonic() < deadline:
             ok, f = cam.get_frame()
             if ok and f is not None:
                 frame = f
-                break
-            time.sleep(0.05)
+            else:
+                time.sleep(0.05)
         if frame is None:
             cam.stop()
             raise RuntimeError('the camera started but sent no picture')
         self.camera = cam
-        with self._latest_lock:
-            self._latest = frame
+        # From here on frames are grabbed on a background thread; the window
+        # only shows the newest, so a slow camera can't freeze it.
+        self.grabber = FrameGrabber(cam)
+        self.grabber.start(first_frame=frame)
+        self._shown = 0
         self.cam_timer.start(40)
         return SessionDraft.from_camera(frame, camera_type)
 
     def _stop_camera(self):
         self.cam_timer.stop()
+        if self.grabber is not None:
+            if not self.grabber.stop():
+                self.messages.add('The camera did not answer; closing it anyway.', 'warn')
+            self.grabber = None
         if self.camera is not None:
             try:
                 self.camera.stop()
             except Exception:                   # releasing must never block closing
                 pass
         self.camera = None
-        with self._latest_lock:
-            self._latest = None
         self.graphics.frames.live_frame = None
 
     def _camera_tick(self):
-        if self.camera is None:
+        if self.grabber is None:
             return
-        ok, f = self.camera.get_frame()
-        if not ok or f is None:
-            return
-        with self._latest_lock:
-            self._latest = f
+        number, f = self.grabber.latest()
         key = self._current_key()
         if self.draft is not None and key in LIVE_NODES and not self.graphics.frames.view.picking():
-            self.graphics.frames.set_live(f)
+            if f is not None and number != self._shown:     # draw only a new frame
+                self._shown = number
+                self.graphics.frames.set_live(f)
         elif self.draft is not None and self.graphics.frames.live_frame is not None:
+            self._shown = 0                     # redraw when the live view comes back
             self.graphics.frames.set_live(None)
 
     def latest_frame(self):
-        with self._latest_lock:
-            return None if self._latest is None else self._latest.copy()
+        if self.grabber is None:
+            return None
+        f = self.grabber.latest()[1]
+        return None if f is None else f.copy()
 
     def capture_reference(self):
         f = self.latest_frame()
