@@ -161,6 +161,7 @@ class StudioWindow(QMainWindow):
         self._make_actions()
         self._make_ribbon()
         self.graphics = GraphicsArea()
+        self.graphics.use_store(self.store)
         self.graphics.results['simulation'].compute_requested.connect(self.simulation_at)
         self._make_panels()
         self._make_statusbar()

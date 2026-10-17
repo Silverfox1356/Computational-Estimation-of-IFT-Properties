@@ -12,6 +12,9 @@ Drop Analysis Studio: the settings-page polish (2026-10-16).
     10 the frame rate can be typed as seconds per frame or frames per second
     11 the Log Plot shows IFT and volume on one graph (two axes) by default
     12 Simulation: a typed time shows its snapshot, or offers to compute it
+    13 log axes keep their labels apart when zoomed
+    14 result tabs: tiles on a grid of equal cells, layout presets (remembered),
+       double-click to enlarge; Yang kD colour scale and hover instead of a legend
 
 Plain script (project convention — no pytest):
     conda run -n ift python tests/test_studio_polish.py      (a few seconds)
@@ -239,6 +242,60 @@ def run(tmp):
     sv.compute_btn.click()
     sv.compute_ended()
     check("a failed re-run says so", sv.time_info.text() == 'Not computed.')
+
+    print("── 14: result tabs on a grid of equal cells; kD colour scale ──")
+    from PyQt6.QtCore import QPointF
+    from PyQt6.QtTest import QTest
+    from PyQt6.QtWidgets import QToolTip
+    from gui.shell.graphics import GraphicsArea
+    yv = YangView()
+    yv.resize(950, 640)
+    yv.show()
+    yv.set_data(yang_data([0.1, 0.5, 1, 2, 3, 4, 5, 6]))
+    app.processEvents()
+
+    def cell(view, name):
+        i = view.grid.indexOf(view.tiles[name])
+        return view.grid.getItemPosition(i) if i >= 0 else None
+    check("Yang default: E-D across the bottom row", cell(yv, 'curves') == (1, 0, 1, 2)
+          and cell(yv, 'fit') == (0, 0, 1, 1) and cell(yv, 'err') == (0, 1, 1, 1))
+    check("equal cells", [yv.grid.rowStretch(r) for r in (0, 1)] == [1, 1]
+          and [yv.grid.columnStretch(c) for c in (0, 1)] == [1, 1])
+    yv.set_layout('3 in a row')
+    check("a layout preset moves the tiles", cell(yv, 'curves') == (0, 2, 1, 1)
+          and yv.grid.rowStretch(1) == 0 and yv.grid.columnStretch(2) == 1)
+    yv.set_layout('2 + 1 wide')
+    QTest.mouseDClick(yv.curves.viewport(), Qt.MouseButton.LeftButton)
+    app.processEvents()
+    check("double-click fills the tab with that plot", yv.maxed == 'curves'
+          and yv.tiles['fit'].isHidden() and yv.tiles['err'].isHidden()
+          and cell(yv, 'curves') == (0, 0, 1, 1))
+    QTest.mouseDClick(yv.curves.viewport(), Qt.MouseButton.LeftButton)
+    app.processEvents()
+    check("double-click again puts it back", yv.maxed is None
+          and not yv.tiles['fit'].isHidden() and cell(yv, 'curves') == (1, 0, 1, 2))
+    check("no legend, a kD colour scale", not yv.curves.plotItem.legend.isVisible()
+          and yv.scale.values == [0.1, 0.5, 1, 2, 3, 4, 5, 6] and yv.scale.best == yv.best_kD)
+    yv.list.item(2).setCheckState(Qt.CheckState.Unchecked)
+    check("hidden curve greyed on the scale", yv.scale.hidden == {1.0})
+    yv._set_all(True)
+    lx, E, Dm, Em = yv.data_of[3.0]
+    k = int(np.nanargmin(E))
+    vb = yv.curves.plotItem.vb
+    yv._hover(vb.mapViewToScene(QPointF(lx[k], E[k])))
+    tip = QToolTip.text()
+    check("hovering a curve names its kD", tip.startswith('kD = 3') and 'lowest E' in tip, tip)
+    ini = QSettings(str(tmp / 'layouts.ini'), QSettings.Format.IniFormat)
+    ga = GraphicsArea()
+    ga.use_store(ini)
+    yg = ga.results['yang']
+    yg._layout_picked(yg.layout_names().index('Stacked'))
+    ga2 = GraphicsArea()
+    ga2.use_store(ini)
+    check("layout choice remembered per tab", ga2.results['yang'].layout_box.currentText()
+          == 'Stacked' and ga2.results['bagalkot'].layout_box.currentText() == 'Side by side')
+    check("one-plot tab shows no Layout box",
+          ga.results['swelling'].layout_box.isHidden() and len(ga.results['simulation'].LAYOUTS) == 3)
 
     print("── 13: log axes keep their labels apart when zoomed ──")
     from gui.shell.result_views import LogAxis, sci_label

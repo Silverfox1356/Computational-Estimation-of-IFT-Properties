@@ -100,6 +100,7 @@ QToolButton#PickerButton { background: #ffffff; border: 1px solid #b9c2cc; borde
     padding: 2px 6px; }
 QToolButton#PickerButton:hover { border-color: #5a85e2; }
 QScrollArea#ResultScroll, QWidget#ResultBody { background: #ffffff; border: none; }
+QFrame#Tile { background: #ffffff; border: 1px solid #e3e7ec; border-radius: 3px; }
 QLabel#PickHint { background: #fff4c2; border-bottom: 1px solid #e0c060; padding: 5px 10px;
     color: #5a4500; font-weight: 600; }
 

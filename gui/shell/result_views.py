@@ -23,10 +23,11 @@ not here; the line under the plots gives the numbers only.
 
 import numpy as np
 import pyqtgraph as pg
-from PyQt6.QtCore import Qt, pyqtSignal
-from PyQt6.QtWidgets import (QFrame, QGridLayout, QHBoxLayout, QLabel, QLineEdit, QListWidget,
-                             QListWidgetItem, QPlainTextEdit, QPushButton, QScrollArea, QSlider,
-                             QToolButton, QVBoxLayout, QWidget)
+from PyQt6.QtCore import QEvent, QPointF, QRectF, Qt, pyqtSignal
+from PyQt6.QtGui import QColor, QCursor, QFont, QLinearGradient, QPainter
+from PyQt6.QtWidgets import (QComboBox, QFrame, QGridLayout, QHBoxLayout, QLabel, QLineEdit,
+                             QListWidget, QListWidgetItem, QPlainTextEdit, QPushButton,
+                             QScrollArea, QSlider, QToolButton, QToolTip, QVBoxLayout, QWidget)
 
 from gui.shell.panels import fmt
 from gui.shell.theme import PLOT_FAIL, PLOT_LINE, PLOT_PASS
@@ -123,17 +124,77 @@ def _arr(v):
     return np.asarray([np.nan if x is None else x for x in (v or [])], float)
 
 
+class Tile(QFrame):
+    """One plot (or panel) of a result tab: an optional header row (e.g. a
+    picker) above the content.  Double-clicking the content asks the view
+    to enlarge the tile to the whole tab, or to put it back."""
+
+    def __init__(self, view, name, content):
+        super().__init__()
+        self.setObjectName('Tile')
+        self.view, self.name, self.content = view, name, content
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(2, 2, 2, 2)
+        lay.setSpacing(2)
+        self.header = QHBoxLayout()
+        self.header.setContentsMargins(4, 0, 0, 0)
+        lay.addLayout(self.header)
+        lay.addWidget(content, 1)
+        self.watch(content)
+
+    def add_header(self, *widgets):
+        for w in widgets:
+            self.header.addWidget(w)
+        self.header.addStretch(1)
+
+    def watch(self, widget):
+        """Catch double-clicks on ``widget`` (and the viewport of a plot)."""
+        widget.installEventFilter(self)
+        if hasattr(widget, 'viewport'):
+            widget.viewport().installEventFilter(self)
+
+    def eventFilter(self, obj, ev):
+        if ev.type() == QEvent.Type.MouseButtonDblClick:
+            self.view.toggle_max(self.name)
+            return True
+        return False
+
+
 class _View(QWidget):
-    """A grid of plots inside a scroll area: when the tab is smaller than
-    the plots' minimum sizes it scrolls instead of laying them over each
-    other."""
+    """A result tab: its plots are tiles on a grid of equal cells, as MATLAB's
+    tiledlayout.  ``LAYOUTS`` lists the arrangements the Layout box offers:
+    (label, rows, columns, {tile: (row, column, rows spanned, columns
+    spanned)}).  Double-clicking a plot fills the tab with it; again puts it
+    back.  When the tab is smaller than the plots' minimum sizes it scrolls
+    instead of laying them over each other."""
+
+    LAYOUTS = ()
+    layout_chosen = pyqtSignal(str)             # label of the arrangement picked
 
     def __init__(self, parent=None):
         super().__init__(parent)
+        self.tiles = {}
+        self.maxed = None                       # name of the enlarged tile
+        self.layout_i = 0
         body = QWidget()
         body.setObjectName('ResultBody')
         self.grid = QGridLayout(body)
         self.grid.setContentsMargins(4, 4, 4, 4)
+        self.grid.setSpacing(6)
+        self.layout_box = QComboBox()
+        self.layout_box.setToolTip('How the plots share the tab')
+        self.layout_box.activated.connect(self._layout_picked)
+        self.hint = QLabel('Double-click a plot to enlarge it')
+        self.hint.setObjectName('Note')
+        bar = QHBoxLayout()
+        bar.setContentsMargins(6, 2, 6, 0)
+        bar.setSpacing(6)
+        bar.addStretch(1)
+        bar.addWidget(self.hint)
+        bar.addSpacing(16)
+        self.layout_label = QLabel('Layout')
+        bar.addWidget(self.layout_label)
+        bar.addWidget(self.layout_box)
         scroll = QScrollArea()
         scroll.setObjectName('ResultScroll')
         scroll.setWidget(body)
@@ -148,15 +209,88 @@ class _View(QWidget):
         outer = QVBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 0)
         outer.setSpacing(0)
+        outer.addLayout(bar)
         outer.addWidget(scroll, 1)
         outer.addWidget(self.note)
+        self._outer = outer
+
+    # -- tiles and layouts ------------------------------------------------------
+    def add_tile(self, name, widget):
+        self.tiles[name] = Tile(self, name, widget)
+        return self.tiles[name]
+
+    def add_strip(self, widget):
+        """A full-width strip under the tiles (e.g. a text log), not a tile."""
+        self._outer.insertWidget(self._outer.indexOf(self.note), widget)
+
+    def finish_layout(self):
+        """Fill the Layout box from LAYOUTS and place the tiles."""
+        self.layout_box.clear()
+        for label, *_ in self.LAYOUTS:
+            self.layout_box.addItem(label)
+        several = len(self.LAYOUTS) > 1
+        self.layout_box.setVisible(several)
+        self.layout_label.setVisible(several)
+        self.apply_layout(0)
+
+    def layout_names(self):
+        return [label for label, *_ in self.LAYOUTS]
+
+    def set_layout(self, label):
+        """Use the arrangement called ``label`` (ignored if unknown)."""
+        names = self.layout_names()
+        if label in names:
+            self.apply_layout(names.index(label))
+
+    def _layout_picked(self, i):
+        self.apply_layout(i)
+        self.layout_chosen.emit(self.LAYOUTS[i][0])
+
+    def _clear_grid(self):
+        for t in self.tiles.values():
+            self.grid.removeWidget(t)
+        for i in range(self.grid.rowCount()):
+            self.grid.setRowStretch(i, 0)
+        for i in range(self.grid.columnCount()):
+            self.grid.setColumnStretch(i, 0)
+
+    def apply_layout(self, i):
+        self.layout_i = i
+        self.maxed = None
+        self.layout_box.setCurrentIndex(i)
+        _label, rows, cols, cells = self.LAYOUTS[i]
+        self._clear_grid()
+        for name, t in self.tiles.items():
+            if name in cells:
+                self.grid.addWidget(t, *cells[name])
+            t.setVisible(name in cells)
+        for r in range(rows):                   # equal cells
+            self.grid.setRowStretch(r, 1)
+        for c in range(cols):
+            self.grid.setColumnStretch(c, 1)
+
+    def toggle_max(self, name):
+        """Fill the tab with one tile, or put the layout back."""
+        if self.maxed == name or name not in self.tiles:
+            self.apply_layout(self.layout_i)
+            return
+        self._clear_grid()
+        for n, t in self.tiles.items():
+            t.setVisible(n == name)
+        self.grid.addWidget(self.tiles[name], 0, 0)
+        self.grid.setRowStretch(0, 1)
+        self.grid.setColumnStretch(0, 1)
+        self.maxed = name
 
 
 class SwellingView(_View):
+    LAYOUTS = (('Single', 1, 1, dict(plot=(0, 0, 1, 1))),)
+
     def __init__(self, parent=None):
         super().__init__(parent)
         self.plot = make_plot('Drop volume', 'Time (s)', 'V / V0')
-        self.grid.addWidget(self.plot, 0, 0)
+        self.add_tile('plot', self.plot)
+        self.finish_layout()
 
     def set_data(self, data):
         p = self.plot
@@ -178,12 +312,16 @@ class SwellingView(_View):
 
 
 class BagalkotView(_View):
+    LAYOUTS = (('Side by side', 1, 2, dict(fit=(0, 0, 1, 1), sweep=(0, 1, 1, 1))),
+               ('Stacked', 2, 1, dict(fit=(0, 0, 1, 1), sweep=(1, 0, 1, 1))))
+
     def __init__(self, parent=None):
         super().__init__(parent)
         self.fit = make_plot('Drop volume: measured and model', 'Time (s)', 'Volume (uL)')
         self.sweep = make_plot('Fit misfit against D', 'D (m2/s)', 'F', logx=True)
-        self.grid.addWidget(self.fit, 0, 0)
-        self.grid.addWidget(self.sweep, 0, 1)
+        self.add_tile('fit', self.fit)
+        self.add_tile('sweep', self.sweep)
+        self.finish_layout()
 
     def set_data(self, data):
         r, c, s = data['result'], data['curve'], data['sweep']
@@ -207,18 +345,84 @@ class BagalkotView(_View):
                           f"{fmt(lo, 3)} to {fmt(hi, 3)} m2/s.")
 
 
-# One colour and marker per kD curve (Yang's Fig 7a uses markers; colours help).
-CURVE_COLOURS = ('#1f77b4', '#ff7f0e', '#2ca02c', '#d62728', '#9467bd', '#8c564b',
-                 '#e377c2', '#7f7f7f', '#bcbd22', '#17becf')
-CURVE_SYMBOLS = ('o', 's', 't', 'd', 't1', 'p', 'h', 'star', '+', 'x')
+# kD curves are coloured along one sequential colour map, low kD dark blue to
+# high kD orange, so a thin colour scale replaces a legend entry per curve
+# and works the same for 5 or 60 kD values.  The map's pale yellow end is
+# left out: it doesn't show on white.
+CURVE_MAP = pg.colormap.get('plasma')
+CURVE_MAP_RANGE = (0.0, 0.82)
 # With more kD curves than this, only the best and its neighbours show at
-# first (the picker brings back any other); more than this many make the
-# plot unreadable and the legend too long.
+# first (the picker brings back any other); more make the plot unreadable.
 MAX_SHOWN = 9
 
 
 def curve_colour(i, n):
-    return CURVE_COLOURS[i] if n <= len(CURVE_COLOURS) else pg.intColor(i, hues=n, maxValue=200)
+    """Colour of the i-th smallest of n kD values."""
+    lo, hi = CURVE_MAP_RANGE
+    x = lo + (hi - lo) * (i / (n - 1) if n > 1 else 0.5)
+    return CURVE_MAP.map(np.array([x]), mode='qcolor')[0]
+
+
+class KdScale(QWidget):
+    """The colour scale beside the E-against-D plot: a bar running through
+    the curve colours, smallest kD at the bottom, labelled with kD values
+    (every one if they fit, else an even selection plus the best).  Hidden
+    curves' labels are grey."""
+
+    BAR_W = 10
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.values, self.best, self.hidden = [], None, set()
+        self.setFixedWidth(78)
+        self.setMinimumHeight(120)
+        self.setToolTip('kD of each curve: colour scale (hover a curve for its values)')
+
+    def set_values(self, values, best=None, hidden=()):
+        self.values, self.best, self.hidden = list(values), best, set(hidden)
+        self.update()
+
+    def _labelled(self, rows_fit):
+        n = len(self.values)
+        if n <= rows_fit:
+            return list(range(n))
+        pick = set(np.round(np.linspace(0, n - 1, max(2, rows_fit - 1))).astype(int).tolist())
+        if self.best in self.values:
+            b = self.values.index(self.best)
+            pick = {i for i in pick if abs(i - b) * (rows_fit - 1) >= n - 1 or i == b}
+            pick.add(b)
+        return sorted(pick)
+
+    def paintEvent(self, _ev):
+        n = len(self.values)
+        if not n:
+            return
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        fm = p.fontMetrics()
+        top, bottom = fm.height() + 8, self.height() - fm.height() // 2 - 4
+        p.setPen(QColor('#222'))
+        p.drawText(2, fm.ascent() + 2, 'kD')
+        x0 = 4
+        grad = QLinearGradient(0, bottom, 0, top)
+        for i in range(n):
+            grad.setColorAt(i / (n - 1) if n > 1 else 0.5, curve_colour(i, n))
+        p.fillRect(QRectF(x0, top, self.BAR_W, bottom - top), grad)
+
+        def y_of(i):
+            return bottom - (bottom - top) * (i / (n - 1) if n > 1 else 0.5)
+        rows_fit = max(2, int((bottom - top) // (fm.height() + 2)) + 1)
+        bold = QFont(p.font())
+        bold.setBold(True)
+        for i in self._labelled(rows_fit):
+            v, y = self.values[i], y_of(i)
+            best = v == self.best
+            p.setPen(QColor('#9aa3ad') if v in self.hidden else QColor('#222'))
+            p.drawLine(QPointF(x0 + self.BAR_W, y), QPointF(x0 + self.BAR_W + 3, y))
+            p.setFont(bold if best else self.font())
+            p.drawText(QPointF(x0 + self.BAR_W + 6, y + fm.ascent() / 2 - 1),
+                       f"{v:.3g}" + (' best' if best else ''))
+        p.end()
 
 
 class CurvePicker(QFrame):
@@ -259,6 +463,15 @@ class YangView(_View):
     (his Fig 7a), the curves shown chosen with a picker; the lowest E for
     each kD."""
 
+    LAYOUTS = (('2 + 1 wide', 2, 2, dict(fit=(0, 0, 1, 1), err=(0, 1, 1, 1),
+                                         curves=(1, 0, 1, 2))),
+               ('1 wide + 2', 2, 2, dict(curves=(0, 0, 1, 2), fit=(1, 0, 1, 1),
+                                         err=(1, 1, 1, 1))),
+               ('3 in a row', 1, 3, dict(fit=(0, 0, 1, 1), err=(0, 1, 1, 1),
+                                         curves=(0, 2, 1, 1))),
+               ('Stacked', 3, 1, dict(fit=(0, 0, 1, 1), err=(1, 0, 1, 1),
+                                      curves=(2, 0, 1, 1))))
+
     def __init__(self, parent=None):
         super().__init__(parent)
         self.fit = make_plot('Interfacial tension: measured and fitted', 'Time (s)', 'IFT (mN/m)')
@@ -266,12 +479,11 @@ class YangView(_View):
                                 logx=True)
         self.err = make_plot('Lowest E for each kD', 'kD', 'E (%)', logx=True)
         self.curves.getAxis('bottom').enableAutoSIPrefix(False)    # plain powers of ten
-        # The legend sits right of the plot, in its own column, so it never
-        # covers the curves.
+        # No legend: the colour scale beside the plot says which kD each
+        # colour is, and hovering a curve names it.
         self.curves.plotItem.legend.setVisible(False)
-        self.legend = pg.LegendItem(labelTextColor='#222', verSpacing=-4)
-        self.curves.plotItem.layout.addItem(self.legend, 2, 3)
-        self.curves.plotItem.layout.setColumnStretchFactor(3, 0)
+        self.scale = KdScale()
+        self.curves.scene().sigMouseMoved.connect(self._hover)
         self.picker = CurvePicker(self)
         self.list = self.picker.list
         self.list.itemChanged.connect(self._toggled)
@@ -282,20 +494,20 @@ class YangView(_View):
         self.pick_button.setText('kD curves')
         self.pick_button.setToolTip('Choose which kD curves the plot shows')
         self.pick_button.clicked.connect(lambda: self.picker.popup(self.pick_button))
-        bar = QHBoxLayout()
-        bar.setContentsMargins(4, 0, 0, 0)
-        bar.addWidget(QLabel('Show'))
-        bar.addWidget(self.pick_button)
-        bar.addStretch(1)
-        self.grid.addWidget(self.fit, 0, 0)
-        self.grid.addWidget(self.err, 0, 1)
-        self.grid.addLayout(bar, 1, 0, 1, 2)
-        self.grid.addWidget(self.curves, 2, 0, 1, 2)
-        self.grid.setColumnStretch(0, 3)
-        self.grid.setColumnStretch(1, 2)
-        self.grid.setRowStretch(0, 2)
-        self.grid.setRowStretch(2, 3)
+        self.add_tile('fit', self.fit)
+        self.add_tile('err', self.err)
+        box = QWidget()
+        row = QHBoxLayout(box)
+        row.setContentsMargins(0, 0, 0, 0)
+        row.setSpacing(2)
+        row.addWidget(self.curves, 1)
+        row.addWidget(self.scale)
+        tile = self.add_tile('curves', box)
+        tile.watch(self.curves)
+        tile.add_header(QLabel('Show'), self.pick_button)
+        self.finish_layout()
         self.items = {}                        # kD -> plot items of its curve
+        self.data_of = {}                      # kD -> (log10 D, E, D_min, E_min)
         self.best_kD = None
 
     def set_data(self, data):
@@ -343,6 +555,7 @@ class YangView(_View):
         p = self.curves
         p.clear()
         self.items = {}
+        self.data_of = {}
         self.list.blockSignals(True)
         self.list.clear()
         lows = []
@@ -358,14 +571,15 @@ class YangView(_View):
             shown = set(order[lo:lo + MAX_SHOWN])
         else:
             shown = set(range(n))
-        for i in order:
+        for rank, i in enumerate(order):
             cv = curves[i]
-            colour = curve_colour(i, n)
-            sym = CURVE_SYMBOLS[i % len(CURVE_SYMBOLS)]
+            colour = curve_colour(rank, n)
             D, E = _arr(cv['D']), _arr(cv['E'])
             best = i == best_i
             line = p.plot(D, E, pen=pg.mkPen(colour, width=2.5 if best else 1.5),
-                          symbol=sym, symbolSize=5, symbolBrush=colour, symbolPen=None)
+                          symbol='o', symbolSize=4, symbolBrush=colour, symbolPen=None)
+            with np.errstate(divide='ignore', invalid='ignore'):
+                self.data_of[cv['kD']] = (np.log10(D), E, cv['D_min'], cv['E_min'])
             low = p.plot([cv['D_min']], [cv['E_min']], pen=None, symbol='star',
                          symbolSize=13 if best else 9, symbolBrush=BEST if best else colour,
                          symbolPen=pg.mkPen('#222', width=0.8))
@@ -389,17 +603,34 @@ class YangView(_View):
             p.setYRange(0, max(top, 1.5 * min(lows)), padding=0.05)
 
     def _legend(self):
-        """The legend lists the curves shown (none when too many to read);
-        the picker's button says how many show."""
-        leg = self.legend
-        leg.clear()
-        shown = [(line, label) for line, _low, label in self.items.values() if line.isVisible()]
-        if len(shown) <= MAX_SHOWN:
-            leg.setColumnCount(max(1, -(-len(shown) // 5)))     # at most five rows
-            for line, label in shown:
-                leg.addItem(line, label)
-        leg.setVisible(0 < len(shown) <= MAX_SHOWN)
-        self.pick_button.setText(f"kD curves: {len(shown)} of {len(self.items)}")
+        """The colour scale (hidden curves greyed) and the picker's count."""
+        kds = sorted(self.items)
+        hidden = [k for k in kds if not self.items[k][0].isVisible()]
+        self.scale.set_values(kds, self.best_kD, hidden)
+        self.pick_button.setText(f"kD curves: {len(kds) - len(hidden)} of {len(kds)}")
+
+    def _hover(self, pos):
+        """Name the curve under the mouse (within 10 px) in a tooltip."""
+        vb = self.curves.plotItem.vb
+        if not self.data_of or not vb.sceneBoundingRect().contains(pos):
+            QToolTip.hideText()
+            return
+        pt = vb.mapSceneToView(pos)
+        xs, ys = vb.viewPixelSize()
+        best, near = None, 10.0
+        for kd, (lx, E, Dm, Em) in self.data_of.items():
+            if not self.items[kd][0].isVisible() or not len(lx):
+                continue
+            with np.errstate(invalid='ignore'):
+                d = np.hypot((lx - pt.x()) / xs, (E - pt.y()) / ys)
+            if np.isfinite(d).any() and np.nanmin(d) < near:
+                best, near = kd, float(np.nanmin(d))
+        if best is None:
+            QToolTip.hideText()
+            return
+        Dm, Em = self.data_of[best][2:]
+        QToolTip.showText(QCursor.pos(), f"kD = {best:g}{' (best)' if best == self.best_kD else ''}"
+                                         f"\nlowest E {fmt(Em, 3)} % at D = {sci_label(Dm)} m2/s")
 
     def _toggled(self, item):
         parts = self.items.get(item.data(Qt.ItemDataRole.UserRole))
@@ -437,6 +668,9 @@ class ModelView(_View):
     by boundary, the mesh, and the FEM system's checks (the Domain, Mesh and
     FEM windows of the Pendant window, in one tab)."""
 
+    LAYOUTS = (('Side by side', 1, 2, dict(plot=(0, 0, 1, 1), info=(0, 1, 1, 1))),
+               ('Stacked', 2, 1, dict(plot=(0, 0, 1, 1), info=(1, 0, 1, 1))))
+
     def __init__(self, parent=None):
         super().__init__(parent)
         self.plot = make_plot('Model: domain and mesh (drop cross-section)', 'r (mm)', 'z (mm)')
@@ -453,10 +687,9 @@ class ModelView(_View):
         scroll.setWidget(self.info)
         scroll.setWidgetResizable(True)
         scroll.setFrameShape(QScrollArea.Shape.NoFrame)
-        self.grid.addWidget(self.plot, 0, 0)
-        self.grid.addWidget(scroll, 0, 1)
-        self.grid.setColumnStretch(0, 3)
-        self.grid.setColumnStretch(1, 2)
+        self.add_tile('plot', self.plot)
+        self.add_tile('info', scroll)
+        self.finish_layout()
 
     def set_data(self, data):
         m = data['model']
@@ -535,6 +768,12 @@ class SimulationView(_View):
     none is stored there, "Compute" asks for a re-run that stores it."""
 
     compute_requested = pyqtSignal(float)       # time (s) to add as a snapshot
+    LAYOUTS = (('1 tall + 2', 2, 2, dict(field=(0, 0, 2, 1), cs=(0, 1, 1, 1),
+                                         gamma=(1, 1, 1, 1))),
+               ('2 + 1 wide', 2, 2, dict(cs=(0, 0, 1, 1), gamma=(0, 1, 1, 1),
+                                         field=(1, 0, 1, 2))),
+               ('3 in a row', 1, 3, dict(field=(0, 0, 1, 1), cs=(0, 1, 1, 1),
+                                         gamma=(0, 2, 1, 1))))
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -582,12 +821,11 @@ class SimulationView(_View):
         self.log.setLineWrapMode(QPlainTextEdit.LineWrapMode.NoWrap)
         self.log.setMaximumHeight(110)
         self.log.setToolTip('Step log of the solver (first and last steps)')
-        self.grid.addWidget(self.field_box, 0, 0, 2, 1)
-        self.grid.addWidget(self.cs, 0, 1)
-        self.grid.addWidget(self.gamma, 1, 1)
-        self.grid.addWidget(self.log, 3, 0, 1, 2)
-        self.grid.setColumnStretch(0, 1)
-        self.grid.setColumnStretch(1, 1)
+        self.add_tile('field', self.field_box)
+        self.add_tile('cs', self.cs)
+        self.add_tile('gamma', self.gamma)
+        self.add_strip(self.log)
+        self.finish_layout()
 
     def _make_canvas(self):
         from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg
@@ -596,6 +834,7 @@ class SimulationView(_View):
         self.canvas = FigureCanvasQTAgg(fig)
         self.canvas.setMinimumSize(220, 220)
         self.field_lay.insertWidget(0, self.canvas, 1)
+        self.tiles['field'].watch(self.canvas)
 
     def set_data(self, data):
         self.data = data

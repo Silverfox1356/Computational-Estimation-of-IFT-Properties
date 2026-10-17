@@ -709,6 +709,14 @@ class GraphicsArea(QTabWidget):
                             yang=YangView(), mesh=ModelView(), simulation=SimulationView())
         self.show_session(None)
 
+    def use_store(self, store):
+        """Remember each result tab's layout in ``store`` (QSettings)."""
+        for key, view in self.results.items():
+            saved = store.value(f'layout/{key}')
+            if saved:
+                view.set_layout(str(saved))
+            view.layout_chosen.connect(lambda label, k=key: store.setValue(f'layout/{k}', label))
+
     def show_session(self, folder):
         self.clear()
         if folder is None:
