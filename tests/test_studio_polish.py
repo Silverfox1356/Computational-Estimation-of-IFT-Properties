@@ -239,6 +239,23 @@ def run(tmp):
     sv.compute_btn.click()
     sv.compute_ended()
     check("a failed re-run says so", sv.time_info.text() == 'Not computed.')
+
+    print("── 13: log axes keep their labels apart when zoomed ──")
+    from gui.shell.result_views import LogAxis, sci_label
+    check("labels in powers of ten", sci_label(1e-9) == '10⁻⁹'
+          and sci_label(3.5e-9) == '3.5×10⁻⁹' and sci_label(2.0) == '2')
+    la = LogAxis('bottom')
+    la.setLogMode(True)
+    for lo, hi, width in ((1e-11, 1e-8, 700), (1e-9, 1e-8, 700), (1.5e-9, 7e-9, 700),
+                          (3.0e-9, 3.6e-9, 700), (3.0e-9, 3.6e-9, 250), (1e-12, 1e-6, 250)):
+        levels = la.tickValues(np.log10(lo), np.log10(hi), width)
+        pos = sorted(v for sp, vals in levels
+                     for v, s in zip(vals, la.tickStrings(vals, 1, sp)) if s)
+        # Labels sit at least LABEL_PX apart on screen (the old axis put ~9 in 20 px).
+        px = np.diff(pos) / (np.log10(hi) - np.log10(lo)) * width
+        check(f"{lo:.2g} to {hi:.2g} on {width} px: labels apart", len(pos) >= 2
+              and (not len(px) or px.min() >= 0.9 * LogAxis.LABEL_PX),
+              f"{len(pos)} labels, closest {px.min() if len(px) else 0:.0f} px")
     w.discard_draft()
     w.close()
 

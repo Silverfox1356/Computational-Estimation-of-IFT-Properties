@@ -35,8 +35,76 @@ NEAR = '#ff8c1a'
 BEST = '#2f9e44'
 
 
+_SUP = str.maketrans('-0123456789', '⁻⁰¹²³⁴⁵⁶⁷⁸⁹')
+
+
+def sci_label(v):
+    """1e-09 -> '10⁻⁹', 3.5e-09 -> '3.5×10⁻⁹', 2 -> '2'."""
+    if not (np.isfinite(v) and v > 0):
+        return ''
+    if 1e-2 <= v < 1e4:
+        return f"{v:.4g}"
+    e = int(np.floor(np.log10(v) + 1e-9))
+    m = round(v / 10 ** e, 3)
+    if m >= 10:
+        m, e = m / 10, e + 1
+    p = '10' + str(e).translate(_SUP)
+    return p if abs(m - 1) < 1e-9 else f"{m:g}×{p}"
+
+
+class LogAxis(pg.AxisItem):
+    """A log axis whose labels never overlap.  pyqtgraph's own labels every
+    minor tick (2, 3 ... 9 x 10^n) once the view is inside one decade, so the
+    labels run into each other when zoomed in.  Here: whole decades (every
+    k-th, so they fit) when the view spans a decade or more, else round
+    numbers evenly spaced in D, as many as fit the axis length."""
+
+    LABEL_PX = 75                               # room one label needs
+    MINOR = -999.5                              # level tag: ticks without labels
+
+    def tickValues(self, minVal, maxVal, size):
+        if not self.logMode:
+            return super().tickValues(minVal, maxVal, size)
+        lo, hi = sorted((minVal, maxVal))
+        n_max = max(2, int(size // self.LABEL_PX))
+        if hi - lo >= 1:
+            decades = np.arange(np.ceil(lo), np.floor(hi) + 1)
+            k = int(np.ceil(len(decades) / n_max)) or 1
+            major = decades[::k]
+            # Few decades in view: label 2 and 5 x 10^n as well.
+            mids = (2, 5) if len(major) * 3 <= n_max else ()
+
+            def at(ms):
+                return [np.log10(m) + d for d in np.arange(np.floor(lo), np.ceil(hi))
+                        for m in ms if lo <= np.log10(m) + d <= hi]
+            levels = [(float(k), major.tolist())]
+            if mids:
+                levels.append((float(np.log10(2)), at(mids)))
+            levels.append((self.MINOR, at([m for m in range(2, 10) if m not in mids])))
+            return levels
+        a, b = 10 ** lo, 10 ** hi
+        raw = (b - a) / n_max
+        mag = 10 ** np.floor(np.log10(raw))
+        step = next(s * mag for s in (1, 2, 2.5, 5, 10) if s * mag >= raw)
+        ticks = np.arange(np.ceil(a / step) * step, b + step * 1e-9, step)
+        ticks = ticks[ticks > 0]
+        return [(float(np.log10(step)), np.log10(ticks).tolist())]
+
+    def tickStrings(self, values, scale, spacing):
+        if not self.logMode:
+            return super().tickStrings(values, scale, spacing)
+        if spacing == self.MINOR:
+            return [''] * len(values)             # 2..9 x 10^n between labelled decades
+        return [sci_label(10 ** v) for v in values]
+
+
 def make_plot(title, xlabel, ylabel, logx=False, logy=False):
-    p = pg.PlotWidget(background='w')
+    axes = {}
+    if logx:
+        axes['bottom'] = LogAxis('bottom')
+    if logy:
+        axes['left'] = LogAxis('left')
+    p = pg.PlotWidget(background='w', axisItems=axes)
     p.setTitle(title, color='#222', size='10pt')
     for ax in ('left', 'bottom'):
         a = p.getAxis(ax)
