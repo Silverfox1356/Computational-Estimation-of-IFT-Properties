@@ -27,7 +27,8 @@ from PyQt6.QtCore import QEvent, QPointF, QRectF, Qt, pyqtSignal
 from PyQt6.QtGui import QColor, QCursor, QFont, QLinearGradient, QPainter
 from PyQt6.QtWidgets import (QComboBox, QFrame, QGridLayout, QHBoxLayout, QLabel, QLineEdit,
                              QListWidget, QListWidgetItem, QPlainTextEdit, QPushButton,
-                             QScrollArea, QSlider, QToolButton, QToolTip, QVBoxLayout, QWidget)
+                             QScrollArea, QSizePolicy, QSlider, QToolButton, QToolTip,
+                             QVBoxLayout, QWidget)
 
 from gui.shell.panels import fmt
 from gui.shell.theme import PLOT_FAIL, PLOT_LINE, PLOT_PASS
@@ -186,6 +187,8 @@ class _View(QWidget):
 
     LAYOUTS = ()
     layout_chosen = pyqtSignal(str)             # label of the arrangement picked
+    strip_toggled = pyqtSignal(bool)            # the strip under the tiles shown / folded
+    strip = strip_head = None
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -235,9 +238,39 @@ class _View(QWidget):
         self.tiles[name] = Tile(self, name, widget)
         return self.tiles[name]
 
-    def add_strip(self, widget):
-        """A full-width strip under the tiles (e.g. a text log), not a tile."""
-        self._outer.insertWidget(self._outer.indexOf(self.note), widget)
+    def add_strip(self, widget, title):
+        """A full-width strip under the tiles (e.g. a text log), not a tile,
+        under a header that folds it away so the plots get the room.  Starts
+        folded; the choice is remembered (strip_toggled)."""
+        head = QToolButton()
+        head.setObjectName('SectionHeader')     # looks like a Settings-page section
+        head.setText(title)
+        head.setCheckable(True)
+        head.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
+        head.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        head.setToolTip(f"Show or hide the {title.lower()}")
+        head.toggled.connect(self._strip_shown)
+        i = self._outer.indexOf(self.note)
+        self._outer.insertWidget(i, head)
+        self._outer.insertWidget(i + 1, widget)
+        self.strip, self.strip_head = widget, head
+        self.set_strip_open(False)
+
+    def set_strip_open(self, on):
+        if self.strip is None:
+            return
+        self.strip_head.blockSignals(True)
+        self.strip_head.setChecked(on)
+        self.strip_head.blockSignals(False)
+        self._show_strip(on)
+
+    def _show_strip(self, on):
+        self.strip.setVisible(on)
+        self.strip_head.setArrowType(Qt.ArrowType.DownArrow if on else Qt.ArrowType.RightArrow)
+
+    def _strip_shown(self, on):
+        self._show_strip(on)
+        self.strip_toggled.emit(on)
 
     def finish_layout(self):
         """Fill the Layout box from LAYOUTS and place the tiles."""
@@ -840,7 +873,7 @@ class SimulationView(_View):
         self.add_tile('field', self.field_box)
         self.add_tile('cs', self.cs)
         self.add_tile('gamma', self.gamma)
-        self.add_strip(self.log)
+        self.add_strip(self.log, 'Solver step log')
         self.finish_layout()
 
     def _make_canvas(self):

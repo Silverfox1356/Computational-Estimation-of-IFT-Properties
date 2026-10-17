@@ -311,6 +311,20 @@ def run(tmp):
     check("back in Live; double-click enlarges the plot", lv.maxed == 'plot'
           and lv.tiles['frame'].isAncestorOf(ga.frames))
 
+    sv2 = ga.results['simulation']
+    check("solver step log folded at first, under its header",
+          sv2.strip is sv2.log and sv2.log.isHidden() and not sv2.strip_head.isChecked()
+          and sv2.strip_head.text() == 'Solver step log')
+    sv2.strip_head.click()
+    check("its header unfolds it", not sv2.log.isHidden()
+          and sv2.strip_head.arrowType() == Qt.ArrowType.DownArrow)
+    ga3 = GraphicsArea()
+    ga3.use_store(ini)
+    check("unfolded stays unfolded next time", not ga3.results['simulation'].log.isHidden())
+    ga3.results['simulation'].strip_head.click()
+    check("and folded stays folded", GraphicsArea().results['simulation'].log.isHidden()
+          and str(ini.value('strip/simulation')).lower() == 'false')
+
     print("── 15: one warning source for page and tree; shared building blocks ──")
     from gui.shell import nodes as N
 

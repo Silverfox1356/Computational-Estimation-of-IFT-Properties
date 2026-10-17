@@ -735,6 +735,9 @@ class GraphicsArea(QTabWidget):
             if saved:
                 view.set_layout(str(saved))
             view.layout_chosen.connect(lambda label, k=key: store.setValue(f'layout/{k}', label))
+            if view.strip is not None:
+                view.set_strip_open(str(store.value(f'strip/{key}', 'false')).lower() == 'true')
+                view.strip_toggled.connect(lambda on, k=key: store.setValue(f'strip/{k}', on))
 
     def show_session(self, folder):
         self.clear()

@@ -70,7 +70,9 @@ Values wait for Apply when they change stored settings (Fluids & Needle).
   (`tile.add_header(...)`), not in a separate row.
 - Many series of one ordered quantity (kD): a sequential colour map plus a thin
   colour scale and a hover tooltip, not a long legend.
-- A full-width text strip (a solver log) goes below the tiles: `add_strip`.
+- A full-width text strip (a solver log) goes below the tiles: `add_strip(widget, title)`.
+  It sits under a fold-away header (like a page Section), starts folded and
+  remembers its state (`strip/<tab>`), so the plots keep the room.
 
 ### Long work
 - Anything slower than ~0.2 s runs as a job: `window.run_job(title, task,
