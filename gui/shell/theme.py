@@ -83,7 +83,7 @@ QLabel#PageTitle { font-size: 13pt; font-weight: 600; color: #1d3557; }
 QLabel#PageCrumb { color: #6b7380; }
 QLabel#WarningList { color: #7a4a00; }
 QLabel#NoWarnings { color: #2f7a44; }
-/* page buttons: one height, no icons, rows of equal widths (pages.FlowLayout) */
+/* page buttons: one height, no icons, rows of equal widths (kit.FlowLayout) */
 QWidget#PageBody QPushButton { min-height: 20px; min-width: 52px; padding: 3px 14px; }
 QToolButton#SectionHeader { background: #eef1f5; border: 1px solid #d9dfe7; padding: 3px 6px;
     font-weight: 600; color: #2a3a4f; text-align: left; }

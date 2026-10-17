@@ -103,7 +103,12 @@ def run(tmp):
     w.select_node('swelling')
     button('Run').click()
     check("swelling finished", wait_job())
-    check("swelling complete in the tree", w.statuses['swelling'][0] == 'done')
+    sw_doc = w.folder.load_analysis('swelling')
+    sw_why = nodes.result_caveat('swelling', sw_doc)
+    check("swelling in the tree: complete, or a warning matching the page",
+          w.statuses['swelling'] == (('warn', sw_why) if sw_why
+                                     else ('done', 'Results stored in the session.')),
+          f"{w.statuses['swelling']}")
     check("Swelling tab added", 'Swelling' in tabs(), str(tabs()))
     check("result shown on the page", any(b.text().startswith('Go to Diffusivity (Bagalkot)')
                                           for b in w.settings.widget().findChildren(QPushButton)))

@@ -37,7 +37,7 @@ from core import frame_log as fl
 from core.session import SessionError
 from gui.shell.icons import icon
 from gui.shell.panels import fmt
-from gui.shell.result_views import (BagalkotView, ModelView, SimulationView, _View,
+from gui.shell.result_views import (BagalkotView, ModelView, SimulationView, _View, make_plot,
                                     SwellingView, YangView)
 from gui.shell.theme import PLOT_FAIL, PLOT_LINE, PLOT_PASS
 
@@ -576,14 +576,11 @@ class LogPlot(QWidget):
         self.chk_failed.toggled.connect(self.redraw)
         tb.addWidget(self.chk_failed)
         lay.addWidget(tb)
-        self.plot = pg.PlotWidget(background='w')
-        for ax in ('left', 'bottom', 'right'):
-            a = self.plot.getAxis(ax)
-            a.setPen(pg.mkPen('#555'))
-            a.setTextPen(pg.mkPen('#222'))
-        self.plot.showGrid(x=True, y=True, alpha=0.25)
-        self.plot.setLabel('bottom', 'Time (s)')
-        self.line = self.plot.plot([], [], pen=pg.mkPen(PLOT_LINE, width=1))
+        self.plot = make_plot('', 'Time (s)', '')   # the left label follows the choice
+        a = self.plot.getAxis('right')               # volume's axis, styled as the others
+        a.setPen(pg.mkPen('#555'))
+        a.setTextPen(pg.mkPen('#222'))
+        self.line =self.plot.plot([], [], pen=pg.mkPen(PLOT_LINE, width=1))
         self.pts = pg.ScatterPlotItem(size=7, pen=pg.mkPen(None), hoverable=True)
         self.pts.sigClicked.connect(self._clicked)
         self.plot.addItem(self.pts)

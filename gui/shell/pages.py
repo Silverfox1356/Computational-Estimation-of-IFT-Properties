@@ -15,15 +15,15 @@ disabled with a note saying so.
 
 import html
 
-from PyQt6.QtCore import QPoint, QRect, QSize, QUrl, Qt
+from PyQt6.QtCore import QUrl, Qt
 from PyQt6.QtGui import QDesktopServices
-from PyQt6.QtWidgets import (QFormLayout, QFrame, QHBoxLayout, QLabel, QLayout,
-                             QListWidget, QListWidgetItem, QPushButton,
-                             QScrollArea, QSizePolicy, QToolButton, QVBoxLayout,
-                             QWidget)
+from PyQt6.QtWidgets import (QFrame, QHBoxLayout, QLabel, QListWidget, QListWidgetItem,
+                             QPushButton, QScrollArea, QSizePolicy, QVBoxLayout, QWidget)
 
 from core import frame_log as fl
 from gui.shell.icons import status_icon
+from gui.shell.kit import (Section, actions, callout, flow_row, note, page_button,
+                           warnings_section)
 from gui.shell.nodes import NODE, STATUS_LABELS, children
 from gui.shell.panels import fmt
 
@@ -76,205 +76,6 @@ def _crumb(key):
     return ' &gt; '.join(reversed(parts)) or 'Analysis Builder'
 
 
-class FlowLayout(QLayout):
-    """Lays widgets out left to right and starts a new line when the next
-    one does not fit (Qt's flow layout example), so a row of buttons wraps
-    instead of holding the Settings panel wide.  ``uniform`` gives every
-    item the width of the widest, ``right`` aligns each line right (the
-    page's main actions sit bottom-right)."""
-
-    def __init__(self, parent=None, spacing=6, uniform=False, right=False):
-        super().__init__(parent)
-        self._items = []
-        self.uniform = uniform
-        self.right = right
-        self.setContentsMargins(0, 0, 0, 0)
-        self.setSpacing(spacing)
-
-    def addItem(self, item):
-        self._items.append(item)
-
-    def count(self):
-        return len(self._items)
-
-    def itemAt(self, i):
-        return self._items[i] if 0 <= i < len(self._items) else None
-
-    def takeAt(self, i):
-        return self._items.pop(i) if 0 <= i < len(self._items) else None
-
-    def expandingDirections(self):
-        return Qt.Orientation(0)
-
-    def hasHeightForWidth(self):
-        return True
-
-    def heightForWidth(self, width):
-        return self._place(QRect(0, 0, width, 0), apply=False)
-
-    def setGeometry(self, rect):
-        super().setGeometry(rect)
-        self._place(rect, apply=True)
-
-    def sizeHint(self):
-        return self.minimumSize()
-
-    def minimumSize(self):
-        size = QSize()
-        for it in self._items:
-            size = size.expandedTo(it.minimumSize())
-        if self.uniform:
-            size = size.expandedTo(QSize(self._widest(), 0))
-        m = self.contentsMargins()
-        return size + QSize(m.left() + m.right(), m.top() + m.bottom())
-
-    def _widest(self):
-        return max((it.sizeHint().width() for it in self._items if not it.isEmpty()), default=0)
-
-    def _place(self, rect, apply):
-        m = self.contentsMargins()
-        r = rect.adjusted(m.left(), m.top(), -m.right(), -m.bottom())
-        sp = self.spacing()
-        same = self._widest() if self.uniform else None
-        lines, line, x = [], [], r.x()
-        for it in self._items:
-            if it.isEmpty():
-                continue
-            hint = it.sizeHint()
-            w = min(same or hint.width(), max(r.width(), it.minimumSize().width()))
-            if line and x + w > r.right() + 1:
-                lines.append(line)
-                line, x = [], r.x()
-            line.append((it, w, hint.height()))
-            x += w + sp
-        if line:
-            lines.append(line)
-        y = r.y()
-        for line in lines:
-            used = sum(w for _, w, _ in line) + sp * (len(line) - 1)
-            x = r.x() + (max(0, r.width() - used) if self.right else 0)
-            for it, w, h in line:
-                if apply:
-                    it.setGeometry(QRect(QPoint(x, y), QSize(w, h)))
-                x += w + sp
-            y += max(h for _, _, h in line) + sp
-        return (y - sp if lines else y) - rect.y() + m.bottom()
-
-
-def flow_row(*widgets, uniform=False, right=False):
-    """A widget holding ``widgets`` in a FlowLayout."""
-    w = QWidget()
-    f = FlowLayout(w, uniform=uniform, right=right)
-    for x in widgets:
-        f.addWidget(x)
-    return w
-
-
-def actions(*buttons):
-    """The page's main buttons (Run, Apply ...): equal widths, bottom-right."""
-    row = flow_row(*buttons, uniform=True, right=True)
-    row.setContentsMargins(0, 8, 0, 0)
-    return row
-
-
-class Section(QWidget):
-    """A collapsible section with a form inside."""
-
-    def __init__(self, title, parent=None):
-        super().__init__(parent)
-        lay = QVBoxLayout(self)
-        lay.setContentsMargins(0, 6, 0, 0)
-        lay.setSpacing(0)
-        self.header = QToolButton()
-        self.header.setObjectName('SectionHeader')
-        self.header.setText(title)
-        self.header.setCheckable(True)
-        self.header.setChecked(True)
-        self.header.setArrowType(Qt.ArrowType.DownArrow)
-        self.header.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
-        # Ignored: a long title is clipped instead of holding the panel wide.
-        self.header.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Fixed)
-        self.header.setToolTip(title)
-        self.header.toggled.connect(self._toggle)
-        self.body = QWidget()
-        self.form = QFormLayout(self.body)
-        self.form.setContentsMargins(4, 6, 2, 2)
-        self.form.setHorizontalSpacing(10)
-        self.form.setVerticalSpacing(5)
-        self.form.setLabelAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
-        # When the panel is narrow a label goes above its box, not beside it.
-        self.form.setRowWrapPolicy(QFormLayout.RowWrapPolicy.WrapLongRows)
-        self.form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow)
-        lay.addWidget(self.header)
-        lay.addWidget(self.body)
-
-    def _toggle(self, on):
-        self.body.setVisible(on)
-        self.header.setArrowType(Qt.ArrowType.DownArrow if on else Qt.ArrowType.RightArrow)
-
-    def field(self, label, value, unit='', result=False, buttons=()):
-        """A read-only value with its unit; ``buttons`` sit on the same row
-        (Load..., Go to ...).  ``value`` None: the buttons alone."""
-        row = QHBoxLayout()
-        row.setSpacing(6)
-        if value is None:
-            for b in buttons:
-                row.addWidget(b)
-            row.addStretch(1)
-            self.form.addRow(label, row)
-            return None
-        v = QLabel(str(value))
-        v.setObjectName('FieldValueResult' if result else 'FieldValue')
-        v.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
-        v.setWordWrap(True)
-        v.setToolTip(str(value))             # long paths are clipped, not lost
-        v.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
-        v.setMinimumWidth(60)
-        row.addWidget(v, 1)
-        if unit or not buttons:
-            u = QLabel(unit)
-            u.setObjectName('FieldUnit')
-            u.setMinimumWidth(30)
-            row.addWidget(u)
-        for b in buttons:
-            row.addWidget(b)
-        self.form.addRow(label, row)
-        return v
-
-    def widget(self, w):
-        self.form.addRow(w)
-
-
-def warnings_section(items, title='Warnings'):
-    """The warnings of a result as a bulleted list, or 'No warnings'."""
-    sec = Section(title)
-    if items:
-        lbl = QLabel('<ul style="margin:0 0 0 -24px">'
-                     + ''.join(f'<li style="margin-bottom:3px">{html.escape(w)}</li>' for w in items)
-                     + '</ul>')
-        lbl.setObjectName('WarningList')
-        lbl.setTextFormat(Qt.TextFormat.RichText)
-    else:
-        lbl = QLabel('No warnings')
-        lbl.setObjectName('NoWarnings')
-    lbl.setWordWrap(True)
-    lbl.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
-    sec.widget(lbl)
-    return sec
-
-
-def callout(text, kind='warn'):
-    box = QFrame()
-    box.setObjectName({'warn': 'Callout', 'good': 'CalloutGood', 'info': 'CalloutInfo'}[kind])
-    lay = QVBoxLayout(box)
-    lay.setContentsMargins(8, 6, 8, 6)
-    lbl = QLabel(text)
-    lbl.setWordWrap(True)
-    lbl.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
-    lay.addWidget(lbl)
-    return box
-
-
 def ift_result_section(rec, title='Result'):
     """The full result of one drop-shape fit (an analyse_frame record):
     what the old Static mode's result card showed, then its warnings."""
@@ -318,13 +119,6 @@ def ift_result_section(rec, title='Result'):
         + '. Treat this IFT with care.']
     v.addWidget(warnings_section(warn))
     return box
-
-
-def note(text):
-    lbl = QLabel(text)
-    lbl.setObjectName('Note')
-    lbl.setWordWrap(True)
-    return lbl
 
 
 class SettingsPanel(QScrollArea):
@@ -475,12 +269,12 @@ class SettingsPanel(QScrollArea):
         sec.field('Name', n.get('name') or '-')
         sec.field('Outer diameter', fmt(n['od_mm'], 6), 'mm')
         sec.field('Diameter tolerance', fmt(100 * n.get('tol_rel', 0.01), 3), '%')
-        from gui.shell.draft_pages import _button, id_spin, id_value
+        from gui.shell.draft_pages import id_spin, id_value
         idd = id_spin(n.get('id_mm'))
         sec.form.addRow('Inner diameter (mm)', idd)
         lay.addWidget(sec)
         lay.addWidget(note('Fixed for this session, except the inner diameter.'))
-        lay.addWidget(actions(_button('Apply', lambda: self.window.set_needle_id(id_value(idd)),
+        lay.addWidget(actions(page_button('Apply', lambda: self.window.set_needle_id(id_value(idd)),
                                       primary=True,
                                       tip='Store the inner diameter; Yang and simulation results '
                                           'made with another value become out of date')))
@@ -502,11 +296,10 @@ class SettingsPanel(QScrollArea):
         else:
             sec.field('File', 'not loaded')
         lay.addWidget(sec)
-        from gui.shell.draft_pages import _button
-        row = [_button('Load calibration...', self.window.load_calibration,
+        row = [page_button('Load calibration...', self.window.load_calibration,
                        tip='Validate a gamma(c) template and copy it into the session folder')]
         if folder.session.calibration:
-            row.insert(0, _button('Remove', self.window.clear_calibration,
+            row.insert(0, page_button('Remove', self.window.clear_calibration,
                                   tip='Remove the calibration from the session folder'))
         lay.addWidget(actions(*row))
 

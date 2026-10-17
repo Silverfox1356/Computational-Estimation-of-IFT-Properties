@@ -106,7 +106,8 @@ def make_plot(title, xlabel, ylabel, logx=False, logy=False):
     if logy:
         axes['left'] = LogAxis('left')
     p = pg.PlotWidget(background='w', axisItems=axes)
-    p.setTitle(title, color='#222', size='10pt')
+    if title:                                   # no title: no space kept for one
+        p.setTitle(title, color='#222', size='10pt')
     for ax in ('left', 'bottom'):
         a = p.getAxis(ax)
         a.setPen(pg.mkPen('#555'))

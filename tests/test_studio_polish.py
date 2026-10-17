@@ -83,7 +83,7 @@ def run(tmp):
     QMessageBox.information = staticmethod(lambda *a, **k: None)
     QMessageBox.question = staticmethod(lambda *a, **k: QMessageBox.StandardButton.Yes)
     from gui.shell.main_window import StudioWindow
-    from gui.shell.pages import warnings_section
+    from gui.shell.kit import warnings_section
     from gui.shell.result_views import MAX_SHOWN, YangView
 
     w = StudioWindow(settings_store=QSettings(str(tmp / 's.ini'), QSettings.Format.IniFormat))
@@ -310,6 +310,34 @@ def run(tmp):
     QTest.mouseDClick(ga.logplot.plot.viewport(), Qt.MouseButton.LeftButton)
     check("back in Live; double-click enlarges the plot", lv.maxed == 'plot'
           and lv.tiles['frame'].isAncestorOf(ga.frames))
+
+    print("── 15: one warning source for page and tree; shared building blocks ──")
+    from gui.shell import nodes as N
+
+    def ydoc(**r):
+        return dict(data=dict(result=dict(dict(success=True, D_well_determined=True), **r)))
+    ok_doc = ydoc(message='global minimum found in the interior of the search box')
+    check("a success note is not a warning", N.result_warnings(None, 'yang', ok_doc) == []
+          and N.result_caveat('yang', ok_doc) == '')
+    bad = ydoc(success=False, D_well_determined=False,
+               message='the best fit is at the edge of your kD range')
+    ws = N.result_warnings(None, 'yang', bad)
+    check("page lists every warning; tree gives the first (+ how many more)", len(ws) == 2
+          and ws[0].startswith('The best fit is at the edge')
+          and N.result_caveat('yang', bad) == ws[0] + ' (+1 more on the page)')
+    sim = dict(data=dict(result=dict(has_nan=False, has_negative=False, calibrated=False)))
+    check("simulation without gamma(c) warns on page and tree alike",
+          N.result_warnings(None, 'simulation', sim) == [N.result_caveat('simulation', sim)])
+    import gui.shell.kit as kit
+    check("page blocks live in kit", all(hasattr(kit, n) for n in (
+        'Section', 'actions', 'button_row', 'page_button', 'number_box', 'sci_edit',
+        'parse_sci', 'parse_sci_list', 'warnings_section', 'callout', 'note')))
+    from gui.shell.graphics import LogPlot as LP
+    lp2 = LP()
+    check("Log Plot made with make_plot (no empty title row, shared style)",
+          not lp2.plot.plotItem.titleLabel.isVisible()
+          and lp2.plot.getAxis('left').pen().color().name() == '#555555'
+          and lp2.plot.minimumWidth() == 220)
 
     print("── 13: log axes keep their labels apart when zoomed ──")
     from gui.shell.result_views import LogAxis, sci_label

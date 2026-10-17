@@ -215,23 +215,64 @@ def node_statuses(folder):
     return st
 
 
-def result_caveat(key, doc):
-    """Why a stored result should not be trusted as it stands, or ''."""
+SWELLING_VERDICTS = dict(negligible='negligible', significant='significant',
+                         not_measurable='not measurable', shrinking='shrinking',
+                         insufficient='too few frames')
+
+
+def result_warnings(folder, name, doc, stale=True):
+    """The warnings of a stored result, as sentences (empty: none).
+
+    The one source of result warnings: the page's Warnings section lists
+    them all, and the tree's status reason is the first (result_caveat).
+    ``stale`` False leaves out "out of date", which the tree shows as its
+    own status; ``folder`` is only needed for that check."""
+    if doc is None:
+        return []
+    if 'error' in doc:
+        return [f"The stored result can't be read: {doc['error']}"]
+    out = []
+    why = folder.out_of_date_reason(name) if stale and folder is not None else ''
+    if why:
+        out.append(f"{why} This result is out of date; run it again.")
     try:
         r = doc['data']['result']
     except (KeyError, TypeError):
-        return 'The stored result cannot be read.'
-    if key == 'yang':
-        if not r.get('success', True):
-            return 'Check the result: ' + (r.get('message') or 'see the page.')
+        return out + ["The stored result can't be read."]
+    if name == 'swelling':
+        if r.get('verdict') in ('not_measurable', 'shrinking', 'insufficient'):
+            out.append(r.get('message', ''))
+        elif r.get('still_rising'):
+            out.append('The volume is still rising at the last frame, so the swelling is a '
+                       'lower bound.')
+    elif name == 'bagalkot':
+        if r.get('at_edge'):
+            out.append('The best D is at the edge of the search range; widen it and run again.')
+    elif name == 'yang':
+        if not r.get('success', True) and r.get('message'):
+            m = r['message']                    # how to fix an edge hit
+            out.append(m[:1].upper() + m[1:])
         if not r.get('D_well_determined', True):
-            return 'D is not well determined by this curve (see the page).'
-    if key == 'simulation' and (r.get('has_nan') or not r.get('calibrated', True)):
-        return ('The concentration has NaN values; use smaller time steps.' if r.get('has_nan')
-                else 'No gamma(c) calibration: only Cs(t) was simulated, not the IFT.')
-    if key == 'bagalkot' and r.get('at_edge'):
-        return 'The best D is at the edge of the search range; widen it.'
-    return ''
+            out.append('D is not well determined: equally good fits span a wide range of D.')
+    elif name == 'simulation':
+        if r.get('has_nan'):
+            out.append('The concentration has NaN values: the run is not usable. Use '
+                       'automatic or smaller time steps.')
+        if r.get('has_negative'):
+            out.append('The final concentration field has negative values.')
+        if not r.get('calibrated', True):
+            out.append('No gamma(c) calibration: only Cs(t) was simulated, not the IFT.')
+    return [w for w in out if w]
+
+
+def result_caveat(key, doc, folder=None):
+    """The tree's reason for a 'warn' status: the first of the result's
+    warnings (out-of-date aside), or ''."""
+    ws = result_warnings(folder, key, doc, stale=False)
+    if not ws:
+        return ''
+    more = f" (+{len(ws) - 1} more on the page)" if len(ws) > 1 else ''
+    return ws[0] + more
 
 
 _ORDER = ('warn', 'input', 'stale', 'ready', 'done', 'off')

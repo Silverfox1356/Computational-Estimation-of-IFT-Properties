@@ -11,85 +11,19 @@ tree and the result tabs when they finish.  What each analysis does is in
 the Guide (gui.shell.guide).
 """
 
-import math
+from PyQt6.QtWidgets import (QButtonGroup, QCheckBox, QComboBox, QLineEdit, QRadioButton,
+                             QSpinBox)
 
-from PyQt6.QtCore import Qt
-from PyQt6.QtWidgets import (QButtonGroup, QCheckBox, QComboBox, QDoubleSpinBox,
-                             QLineEdit, QPushButton, QRadioButton, QSpinBox)
-
-from core import frame_log as fl
 from core.analyses import SWELLING_DEFAULT_THRESHOLD
 from core.session import YANG_MIN_POINTS, SessionError
-from gui.shell.draft_pages import _button, _row, _spin
-from gui.shell.pages import Section, actions, ift_result_section, note, warnings_section
+from gui.shell.kit import (Section, actions, button_row, note, number_box, page_button,
+                           parse_sci, parse_sci_list, sci_edit, warnings_section)
+from gui.shell.nodes import SWELLING_VERDICTS, result_warnings
+from gui.shell.pages import ift_result_section
 from gui.shell.panels import fmt
 
 KEYS = ('swelling', 'bagalkot', 'yang', 'yang_model', 'simulation', 'results', 'threshold',
         'frame_ift')
-
-
-def _sci(text, name):
-    try:
-        v = float(text.strip().replace(',', '.'))
-    except ValueError:
-        raise ValueError(f"{name}: '{text}' is not a number") from None
-    if not (v > 0 and math.isfinite(v)):
-        raise ValueError(f"{name} must be a positive number")
-    return v
-
-
-def _sci_edit(value):
-    e = QLineEdit(f"{value:.3g}")
-    e.setToolTip('A number such as 1e-9')
-    return e
-
-
-def _parse_list(text, name):
-    out = []
-    for part in text.replace(';', ',').split(','):
-        if part.strip():
-            out.append(_sci(part, name))
-    return out
-
-
-SWELLING_VERDICTS = dict(negligible='negligible', significant='significant',
-                         not_measurable='not measurable', shrinking='shrinking',
-                         insufficient='too few frames')
-
-
-def result_warnings(folder, name, doc):
-    """The warnings of a stored result, as sentences (empty: none)."""
-    if doc is None:
-        return []
-    if 'error' in doc:
-        return [f"The stored result can't be read: {doc['error']}"]
-    out = []
-    why = folder.out_of_date_reason(name)
-    if why:
-        out.append(f"{why} This result is out of date; run it again.")
-    r = doc['data']['result']
-    if name == 'swelling':
-        if r.get('verdict') in ('not_measurable', 'shrinking', 'insufficient'):
-            out.append(r.get('message', ''))
-        elif r.get('still_rising'):
-            out.append('The volume is still rising at the last frame, so the swelling is a '
-                       'lower bound.')
-    elif name == 'bagalkot':
-        if r.get('at_edge'):
-            out.append('The best D is at the edge of the search range; widen it and run again.')
-    elif name == 'yang':
-        if not r.get('D_well_determined'):
-            out.append('D is not well determined: equally good fits span a wide range of D.')
-        if r.get('message'):
-            m = r['message']
-            out.append(m[:1].upper() + m[1:])
-    elif name == 'simulation':
-        if r.get('has_nan'):
-            out.append('The concentration has NaN values: the run is not usable. Use '
-                       'automatic or smaller time steps.')
-        if r.get('has_negative'):
-            out.append('The final concentration field has negative values.')
-    return [w for w in out if w]
 
 
 def yang_search(st, lay):
@@ -116,7 +50,7 @@ def yang_search(st, lay):
     grp = QButtonGroup(sec)
     for r in (grid_r, auto_r, man_r):
         grp.addButton(r)
-    sec.widget(_row(grid_r, auto_r, man_r, uniform=False))
+    sec.widget(button_row(grid_r, auto_r, man_r, uniform=False))
     mode = st.get('search') or ('grid' if not st else 'auto')
     if mode == 'grid':
         grid_r.setChecked(True)
@@ -124,14 +58,14 @@ def yang_search(st, lay):
         (auto_r if st.get('auto', True) else man_r).setChecked(True)
 
     spec = st.get('kD_spec') or dict(start=1.0, stop=5.0, step=1.0, extras=[0.1, 0.5])
-    kd_from = _spin(spec['start'], 1e-6, 1e6, 4, 0.5)
-    kd_to = _spin(spec['stop'], 1e-6, 1e6, 4, 0.5)
-    kd_step = _spin(spec['step'], 1e-6, 1e6, 4, 0.5)
+    kd_from = number_box(spec['start'], 1e-6, 1e6, 4, 0.5)
+    kd_to = number_box(spec['stop'], 1e-6, 1e6, 4, 0.5)
+    kd_step = number_box(spec['step'], 1e-6, 1e6, 4, 0.5)
     extras = QLineEdit(', '.join(f"{v:g}" for v in spec.get('extras') or []))
     extras.setPlaceholderText('e.g. 0.1, 0.5')
     extras.setToolTip('More kD values outside the even steps, separated by commas')
     dg = st.get('D_grid') or YANG_GRID_D
-    g_lo, g_hi = _sci_edit(dg[0]), _sci_edit(dg[1])
+    g_lo, g_hi = sci_edit(dg[0]), sci_edit(dg[1])
     g_n = QSpinBox()
     g_n.setRange(5, 400)
     g_n.setValue(int(dg[2]))
@@ -142,14 +76,14 @@ def yang_search(st, lay):
                  ('Points per curve', g_n))
     db = st.get('D_bounds') or (1e-11, 1e-7)
     kb = st.get('kD_range') or (1e-2, 1e3)
-    d_lo, d_hi, k_lo, k_hi = (_sci_edit(v) for v in (*db, *kb))
+    d_lo, d_hi, k_lo, k_hi = (sci_edit(v) for v in (*db, *kb))
     man_rows = (('D from (m2/s)', d_lo), ('D to (m2/s)', d_hi), ('kD from', k_lo),
                 ('kD to', k_hi))
     for label, wdg in grid_rows + man_rows:
         sec.form.addRow(label, wdg)
     count = note('')
     sec.widget(count)
-    offset = _spin(st.get('t_offset', 0.0), -1e5, 1e5, 2, 1, ' s')
+    offset = number_box(st.get('t_offset', 0.0), -1e5, 1e5, 2, 1, ' s')
     offset.setToolTip('Added to the times of the IFT curve, if the drop formed before t = 0 '
                       'of the curve (Yang et al. added 2 s)')
     sec.form.addRow('Time offset', offset)
@@ -157,7 +91,7 @@ def yang_search(st, lay):
     def values():
         try:
             return kD_grid(kd_from.value(), kd_to.value(), kd_step.value(),
-                           _parse_list(extras.text(), 'Extra kD value'))
+                           parse_sci_list(extras.text(), 'Extra kD value'))
         except AnalysisError as e:
             raise ValueError(str(e)) from None
 
@@ -185,16 +119,16 @@ def yang_search(st, lay):
         kw = dict(t_offset=offset.value())
         if grid_r.isChecked():
             kw.update(kD_values=values(),
-                      D_grid=(_sci(g_lo.text(), 'D from'), _sci(g_hi.text(), 'D to'),
+                      D_grid=(parse_sci(g_lo.text(), 'D from'), parse_sci(g_hi.text(), 'D to'),
                               g_n.value()),
                       kD_spec=dict(start=kd_from.value(), stop=kd_to.value(),
                                    step=kd_step.value(),
-                                   extras=_parse_list(extras.text(), 'Extra kD value')))
+                                   extras=parse_sci_list(extras.text(), 'Extra kD value')))
             if not kw['D_grid'][0] < kw['D_grid'][1]:
                 raise ValueError('D from must be below D to')
         elif man_r.isChecked():
-            kw.update(D_bounds=(_sci(d_lo.text(), 'D from'), _sci(d_hi.text(), 'D to')),
-                      kD_range=(_sci(k_lo.text(), 'kD from'), _sci(k_hi.text(), 'kD to')))
+            kw.update(D_bounds=(parse_sci(d_lo.text(), 'D from'), parse_sci(d_hi.text(), 'D to')),
+                      kD_range=(parse_sci(k_lo.text(), 'kD from'), parse_sci(k_hi.text(), 'kD to')))
         return kw
     return kwargs
 
@@ -256,7 +190,7 @@ class AnalysisPages:
         busy = self.w.job_running()
         run = self._run_button(bool(order), lambda: self.w.measure_frame(combo.currentData()),
                                'Measure IFT')
-        other = _button('Image file...', self.w.measure_image_file,
+        other = page_button('Image file...', self.w.measure_image_file,
                         tip='Measure an image taken with the same camera, needle and '
                             'magnification (not stored)')
         other.setEnabled(not busy)
@@ -266,11 +200,11 @@ class AnalysisPages:
             lay.addWidget(ift_result_section(fit['rec'], f"Result: {fit['label']}"))
 
     def _export_button(self, name):
-        return _button('Export CSV...', lambda: self.w.export_result(name),
+        return page_button('Export CSV...', lambda: self.w.export_result(name),
                        tip='Save the settings, the result and its curves as CSV')
 
     def _run_button(self, ok, slot, text='Run'):
-        b = _button(text, slot, primary=True)
+        b = page_button(text, slot, primary=True)
         b.setEnabled(ok and not self.w.job_running())
         return b
 
@@ -281,7 +215,7 @@ class AnalysisPages:
         thr0 = (doc or {}).get('data', {}).get('settings', {}).get(
             'threshold', SWELLING_DEFAULT_THRESHOLD)
         sec = Section('Settings')
-        thr = _spin(100 * thr0, 0.1, 99, 2, 0.5, ' %')
+        thr = number_box(100 * thr0, 0.1, 99, 2, 0.5, ' %')
         thr.setToolTip('Volume change above which the drop counts as swelling '
                        '(Bagalkot: ignoring 3 % swelling shifts D by about 2 %)')
         sec.form.addRow('Swelling threshold', thr)
@@ -308,9 +242,9 @@ class AnalysisPages:
         self._warnings(folder, 'swelling', doc, lay)
         buttons = [self._export_button('swelling')]
         if rec in ('yang', 'bagalkot'):
-            buttons.insert(0, _button(f"Go to Diffusivity ({rec.capitalize()})",
+            buttons.insert(0, page_button(f"Go to Diffusivity ({rec.capitalize()})",
                                       lambda: self.w.select_node(rec)))
-        lay.addWidget(_row(*buttons))
+        lay.addWidget(button_row(*buttons))
 
     # -- Bagalkot ---------------------------------------------------------------------
     def page_bagalkot(self, folder, lay):
@@ -323,7 +257,7 @@ class AnalysisPages:
             return 'file' if from_file.isChecked() else 'log'
         lo0, hi0 = st.get('D_range') or DEFAULT_D_RANGE
         sec = Section('Settings')
-        lo, hi = _sci_edit(lo0), _sci_edit(hi0)
+        lo, hi = sci_edit(lo0), sci_edit(hi0)
         sec.form.addRow('D from (m2/s)', lo)
         sec.form.addRow('D to (m2/s)', hi)
         moving = QCheckBox('Growing interface')
@@ -335,7 +269,7 @@ class AnalysisPages:
 
         def run():
             try:
-                rng = (_sci(lo.text(), 'D from'), _sci(hi.text(), 'D to'))
+                rng = (parse_sci(lo.text(), 'D from'), parse_sci(hi.text(), 'D to'))
             except ValueError as e:
                 self.w.messages.add(str(e), 'warn')
                 return
@@ -369,7 +303,7 @@ class AnalysisPages:
                   if doc['data']['settings'].get('curve') == 'file' else 'the frame log')
         lay.addWidget(sec)
         self._warnings(folder, 'bagalkot', doc, lay)
-        lay.addWidget(_row(_button('Show the fit', lambda: self.w.graphics.show_result('bagalkot')),
+        lay.addWidget(button_row(page_button('Show the fit', lambda: self.w.graphics.show_result('bagalkot')),
                            self._export_button('bagalkot')))
 
     # -- Yang -------------------------------------------------------------------------
@@ -427,8 +361,8 @@ class AnalysisPages:
         sec.field('Drop outline from', f"frame {m.get('frame_index')}")
         lay.addWidget(sec)
         self._warnings(folder, 'yang', doc, lay)
-        lay.addWidget(_row(_button('Show the fit', lambda: self.w.graphics.show_result('yang')),
-                           _button('Show the model', lambda: self.w.graphics.show_result('mesh')),
+        lay.addWidget(button_row(page_button('Show the fit', lambda: self.w.graphics.show_result('yang')),
+                           page_button('Show the model', lambda: self.w.graphics.show_result('mesh')),
                            self._export_button('yang')))
 
     def _yang_inputs(self, folder, st, lay):
@@ -440,7 +374,7 @@ class AnalysisPages:
         sec.form.addRow('Drop outline from', combo)
         has_cal = bool(folder.calibration_path and folder.calibration_path.is_file())
         sec.field('gamma(c)', 'stored in the session' if has_cal else 'not loaded',
-                  buttons=[] if has_cal else [_button('Load...', self.w.load_calibration,
+                  buttons=[] if has_cal else [page_button('Load...', self.w.load_calibration,
                                                       tip='Load the gamma(c) calibration')])
         lay.addWidget(sec)
 
@@ -467,9 +401,9 @@ class AnalysisPages:
         except SessionError as e:
             info = str(e)
         sec.field('Curve file', info, buttons=[
-            _button('Load...', self.w.load_ift_curve,
+            page_button('Load...', self.w.load_ift_curve,
                     tip='Load IFT against time (CSV); copied into the session folder'),
-            _button('Template...', self.w.save_ift_template,
+            page_button('Template...', self.w.save_ift_template,
                     tip='Save a CSV with the expected columns (time_s, ift_mNm)')])
         can = QLabel()
         can.setWordWrap(True)
@@ -505,9 +439,9 @@ class AnalysisPages:
         except SessionError as e:
             info = str(e)
         sec.field('Curve file', info, buttons=[
-            _button('Load...', self.w.load_volume_curve,
+            page_button('Load...', self.w.load_volume_curve,
                     tip='Load volume against time (CSV); copied into the session folder'),
-            _button('Template...', lambda: self.w.save_curve_template('volume'),
+            page_button('Template...', lambda: self.w.save_curve_template('volume'),
                     tip='Save a CSV with the expected columns (time_s, volume_uL)')])
         can = QLabel()
         can.setWordWrap(True)
@@ -565,7 +499,7 @@ class AnalysisPages:
         lay.addWidget(warnings_section(
             ['Some FEM checks fail: the model may not conserve the solute. Check the drop '
              'outline and the mesh.'] if fem and not fem['all_pass'] else []))
-        lay.addWidget(_row(_button('Show the model', lambda: self.w.graphics.show_result('mesh'))))
+        lay.addWidget(button_row(page_button('Show the model', lambda: self.w.graphics.show_result('mesh'))))
 
     # -- forward simulation ------------------------------------------------------------
     def page_simulation(self, folder, lay):
@@ -581,16 +515,16 @@ class AnalysisPages:
         has_cal = bool(folder.calibration_path and folder.calibration_path.is_file())
         sec.field('gamma(c)', 'stored in the session' if has_cal
                   else 'not loaded (Cs(t) only)',
-                  buttons=[] if has_cal else [_button('Load...', self.w.load_calibration,
+                  buttons=[] if has_cal else [page_button('Load...', self.w.load_calibration,
                                                       tip='Load the gamma(c) calibration')])
         sec.field('Can run', 'Yes' if ok else f"No: {why}")
         lay.addWidget(sec)
 
         sec = Section('Parameters')
-        d_e, k_e = _sci_edit(st.get('D', D0)), _sci_edit(st.get('k', k0))
+        d_e, k_e = sci_edit(st.get('D', D0)), sci_edit(st.get('k', k0))
         sec.form.addRow('D (m2/s)', d_e)
         sec.form.addRow('k (m/s)', k_e)
-        dur = _spin(st.get('duration_s', dur0), 0.01, 1e7, 2, 10, ' s')
+        dur = number_box(st.get('duration_s', dur0), 0.01, 1e7, 2, 10, ' s')
         dur.setToolTip('Simulated time from the moment the drop formed')
         sec.form.addRow('Duration', dur)
         if has_yang:
@@ -598,7 +532,7 @@ class AnalysisPages:
                 d_e.setText(f"{D0:.4g}")
                 k_e.setText(f"{k0:.4g}")
                 dur.setValue(dur0)
-            sec.widget(_row(_button("Use Yang's best fit", use_yang,
+            sec.widget(button_row(page_button("Use Yang's best fit", use_yang,
                                     tip=f"D = {D0:.3g} m2/s, k = {k0:.3g} m/s, "
                                         f"{dur0:g} s")))
         auto = QRadioButton('Automatic time steps')
@@ -611,7 +545,7 @@ class AnalysisPages:
         (fixed if st.get('dt_s') else auto).setChecked(True)
         sec.widget(auto)
         sec.widget(fixed)
-        dt = _spin(st.get('dt_s') or 0.01, 1e-5, 1e5, 5, 0.01, ' s')
+        dt = number_box(st.get('dt_s') or 0.01, 1e-5, 1e5, 5, 0.01, ' s')
         sec.form.addRow('Time step', dt)
         fixed.toggled.connect(lambda on: sec.form.setRowVisible(dt, on))
         sec.form.setRowVisible(dt, fixed.isChecked())
@@ -640,11 +574,11 @@ class AnalysisPages:
 
         def run():
             try:
-                kw = dict(D=_sci(d_e.text(), 'D'), k=_sci(k_e.text(), 'k'),
+                kw = dict(D=parse_sci(d_e.text(), 'D'), k=parse_sci(k_e.text(), 'k'),
                           duration_s=dur.value(), frame_index=frame.currentData(),
                           dt_s=dt.value() if fixed.isChecked() else None,
                           n_snapshots=n_snap.value(), snapshot_spacing=spacing.currentData(),
-                          snapshot_times=_parse_list(times.text(), 'Snapshot times'))
+                          snapshot_times=parse_sci_list(times.text(), 'Snapshot times'))
             except ValueError as e:
                 self.w.messages.add(str(e), 'warn')
                 return
@@ -670,9 +604,9 @@ class AnalysisPages:
                                     f"{'yes' if r['has_negative'] else 'no'}")
         lay.addWidget(sec)
         self._warnings(folder, 'simulation', doc, lay)
-        lay.addWidget(_row(_button('Show the simulation',
+        lay.addWidget(button_row(page_button('Show the simulation',
                                    lambda: self.w.graphics.show_result('simulation')),
-                           _button('Show the model', lambda: self.w.graphics.show_result('mesh')),
+                           page_button('Show the model', lambda: self.w.graphics.show_result('mesh')),
                            self._export_button('simulation')))
 
     # -- results -------------------------------------------------------------------------
@@ -698,9 +632,9 @@ class AnalysisPages:
                            + f" after {fmt(r['simulated_s'], 4)} s")}[name]()
             stale = ' (out of date)' if folder.analysis_out_of_date(name) else ''
             sec.field(label + stale, summary)
-            sec.widget(_row(_button('Open', lambda n=name: self.w.select_node(n),
+            sec.widget(button_row(page_button('Open', lambda n=name: self.w.select_node(n),
                                     tip='Settings and result'),
-                            _button('Plot', lambda n=name: self.w.graphics.show_result(n)),
+                            page_button('Plot', lambda n=name: self.w.graphics.show_result(n)),
                             self._export_button(name)))
             warnings += [f"{label}: {w}" for w in result_warnings(folder, name, doc)]
         if not any_:
@@ -730,13 +664,13 @@ class AnalysisPages:
         spin.setRange(0, 255)
         spin.setValue(128 if level is None else level)
         sec.widget(auto)
-        sec.widget(_row(fixed, spin, uniform=False))
+        sec.widget(button_row(fixed, spin, uniform=False))
         lay.addWidget(sec)
 
         def rebuild():
             ops = [] if auto.isChecked() else [('threshold', spin.value())]
             self.w.rebuild_log(None, prep_ops=ops)
-        b = _button('Rebuild log', rebuild, primary=True,
+        b = page_button('Rebuild log', rebuild, primary=True,
                     tip='Fit every stored frame again with this threshold; stored results '
                         'become out of date')
         b.setEnabled(bool(folder.frame_indices()) and not self.w.job_running())

@@ -47,11 +47,13 @@ page. Explanations go in the Guide (`guide.TOPICS[node key]`) and tooltips.
 Values wait for Apply when they change stored settings (Fluids & Needle).
 
 ### Warnings: one source, three places
-- A result's warnings come from **one pure function per result**
-  (`analysis_pages.result_warnings`).
-- They show in **the Warnings section of that node's page**, and the node's
-  tree status turns "warn" with a reason (today that reason comes from
-  `nodes.result_caveat`; see section 5).
+- A result's warnings come from **one function**, `nodes.result_warnings`
+  (no Qt, so it is testable without a display).
+- They show in **the Warnings section of that node's page** (all of them),
+  and the node's tree status turns "warn" with the first as the reason
+  (`nodes.result_caveat`, "+n more on the page" when there are more).
+  "Out of date" is its own tree status, not a warning there.
+- Success notes are not warnings (e.g. Yang's "global minimum found").
 - They never appear on a graphics tab; the line under the plots gives numbers only.
 - Run-time events (started, finished, failed, stopped) go to the **Messages**
   panel: `messages.add(text, 'info' | 'ok' | 'warn' | 'error')`.
@@ -86,18 +88,21 @@ Values wait for Apply when they change stored settings (Fluids & Needle).
 
 ## 3. Building blocks
 
+All page blocks are in **`gui/shell/kit.py`**; import them from there.
+
 | Need | Use | Where |
 |---|---|---|
-| Collapsible section with a form | `Section(title)`, `.form.addRow`, `.field(...)`, `.widget(w)` | pages.py |
-| Main buttons, bottom-right | `actions(*buttons)` | pages.py |
-| A row of buttons that wraps | `_row(*widgets)` / `flow_row(...)` | draft_pages.py / pages.py |
-| A page button | `_button(text, slot, primary=False, tip='')` | draft_pages.py |
+| Collapsible section with a form | `Section(title)`, `.form.addRow`, `.field(...)`, `.widget(w)` | kit.py |
+| Main buttons, bottom-right | `actions(*buttons)` | kit.py |
+| A row of buttons that wraps | `button_row(*widgets)` / `flow_row(...)` | kit.py |
+| A page button | `page_button(text, slot, primary=False, tip='')` | kit.py |
 | Run button (disabled while a job runs) | `AnalysisPages._run_button(ok, slot)` | analysis_pages.py |
-| Number box | `_spin(value, lo, hi, decimals, step, suffix)` | draft_pages.py |
-| Scientific number (1e-9) | `_sci_edit(value)` / `_sci(text, name)` / `_parse_list` | analysis_pages.py |
+| Number box | `number_box(value, lo, hi, decimals, step, suffix)` | kit.py |
+| Scientific number (1e-9) | `sci_edit(value)` / `parse_sci(text, name)` / `parse_sci_list` | kit.py |
 | Frame rate (s/frame or fps) | `RateBox` | draft_pages.py |
-| Warnings list | `warnings_section(items)` | pages.py |
-| Highlighted note | `callout(text, 'warn' / 'good' / 'info')`, `note(text)` | pages.py |
+| IFT result of one frame | `ift_result_section(rec)` | pages.py |
+| Warnings list | `warnings_section(items)`; the items: `nodes.result_warnings` | kit.py / nodes.py |
+| Highlighted note | `callout(text, 'warn' / 'good' / 'info')`, `note(text)` | kit.py |
 | Number formatting | `fmt(value, digits)`; axis labels `sci_label(v)` | panels.py / result_views.py |
 | Plot | `make_plot(...)`, `LogAxis` | result_views.py |
 | Graphics tab | `_View` + `LAYOUTS` + `add_tile` + `finish_layout` | result_views.py |
@@ -115,21 +120,16 @@ Values wait for Apply when they change stored settings (Fluids & Needle).
    rule in `node_statuses`.
 3. **Page**: `AnalysisPages.page_<key>` in the order of section 2 (Inputs,
    Parameters, `actions(Run)`, Result, Warnings, secondary buttons).
-4. **Warnings**: add its checks to `result_warnings`.
+4. **Warnings**: add its checks to `nodes.result_warnings` (page and tree follow).
 5. **Graphics**: a `_View` subclass with `LAYOUTS`, tiles from `make_plot`;
    register it in `GraphicsArea.results` and `RESULT_TABS`.
 6. **Guide**: a topic in `guide.TOPICS`.
 7. **Tests**: checks in the matching `tests/test_studio_*.py` suite.
 
-## 5. Known gaps (to tidy so the rules hold everywhere)
+## 5. Known gaps
 
-- The building blocks are spread over `pages.py`, `draft_pages.py` and
-  `analysis_pages.py`, and some are "private" (`_button`, `_row`, `_spin`)
-  yet imported across files. They belong in one module (`gui/shell/kit.py`).
-- Two warning sources: `nodes.result_caveat` (tree status) and
-  `analysis_pages.result_warnings` (page) are written separately and can
-  disagree. One should be built on the other.
-- `LogPlot` (Log Plot / Live) builds its own pyqtgraph plot instead of
-  `make_plot`, so its look can drift from the result plots.
 - The old Pendant / Sessile windows are outside these rules (kept as they are,
   by decision).
+
+Tidied 2026-10-17: page blocks moved into `kit.py`; one warning source
+(`nodes.result_warnings`) for page and tree; `LogPlot` built with `make_plot`.
