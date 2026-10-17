@@ -147,6 +147,20 @@ class Tile(QFrame):
             self.header.addWidget(w)
         self.header.addStretch(1)
 
+    def set_content(self, widget):
+        """Put ``widget`` in the tile (it may be shared with another tab,
+        which takes it back by adding it there)."""
+        lay = self.layout()
+        old = self.content
+        if old is not None and old is not widget and self.isAncestorOf(old):
+            lay.removeWidget(old)
+            old.hide()
+        if not self.isAncestorOf(widget):
+            lay.addWidget(widget, 1)
+        widget.show()
+        self.content = widget
+        self.watch(widget)
+
     def watch(self, widget):
         """Catch double-clicks on ``widget`` (and the viewport of a plot)."""
         widget.installEventFilter(self)
@@ -154,7 +168,8 @@ class Tile(QFrame):
             widget.viewport().installEventFilter(self)
 
     def eventFilter(self, obj, ev):
-        if ev.type() == QEvent.Type.MouseButtonDblClick:
+        # A shared widget moved to another tab keeps the filter: ignore it there.
+        if ev.type() == QEvent.Type.MouseButtonDblClick and self.isAncestorOf(obj):
             self.view.toggle_max(self.name)
             return True
         return False

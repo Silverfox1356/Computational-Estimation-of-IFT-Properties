@@ -297,6 +297,20 @@ def run(tmp):
     check("one-plot tab shows no Layout box",
           ga.results['swelling'].layout_box.isHidden() and len(ga.results['simulation'].LAYOUTS) == 3)
 
+    lv = ga.live
+    lv.attach(ga.frames, ga.logplot)
+    check("Live tab: frame and plot are tiles with a Layout box",
+          lv.tiles['frame'].isAncestorOf(ga.frames) and lv.tiles['plot'].isAncestorOf(ga.logplot)
+          and lv.layout_names() == ['Side by side', 'Stacked'] and not lv.layout_box.isHidden())
+    ga.addTab(ga.frames, 'Frame')               # the Frame tab takes the viewer back
+    QTest.mouseDClick(ga.frames.view.viewport(), Qt.MouseButton.LeftButton)
+    check("a double-click on the Frame tab doesn't touch the Live layout", lv.maxed is None
+          and not lv.tiles['frame'].isAncestorOf(ga.frames))
+    lv.attach(ga.frames, ga.logplot)
+    QTest.mouseDClick(ga.logplot.plot.viewport(), Qt.MouseButton.LeftButton)
+    check("back in Live; double-click enlarges the plot", lv.maxed == 'plot'
+          and lv.tiles['frame'].isAncestorOf(ga.frames))
+
     print("── 13: log axes keep their labels apart when zoomed ──")
     from gui.shell.result_views import LogAxis, sci_label
     check("labels in powers of ten", sci_label(1e-9) == '10⁻⁹'

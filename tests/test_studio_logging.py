@@ -217,8 +217,9 @@ def run(tmp):
         time.sleep(0.02)
     tabs = [w.graphics.tabText(i) for i in range(w.graphics.count())]
     check("live: frame beside IFT and volume against time", tabs == ['Live']
-          and w.graphics.live.indexOf(w.graphics.frames) == 0
-          and w.graphics.live.indexOf(w.graphics.logplot) == 1
+          and w.graphics.live.tiles['frame'].content is w.graphics.frames
+          and w.graphics.live.tiles['plot'].content is w.graphics.logplot
+          and w.graphics.live.tiles['frame'].isAncestorOf(w.graphics.frames)
           and w.graphics.logplot.combo.currentData() == 'ift+volume', str(tabs))
     w.cancel_job()
     check("camera logging stopped", wait_job())

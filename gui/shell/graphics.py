@@ -29,7 +29,7 @@ from PyQt6.QtWidgets import (QCheckBox, QComboBox, QFrame, QGraphicsEllipseItem,
                              QGraphicsLineItem, QGraphicsPathItem, QGraphicsPixmapItem,
                              QGraphicsRectItem, QGraphicsScene, QGraphicsView,
                              QHBoxLayout, QLabel, QListWidget, QListWidgetItem,
-                             QPushButton, QSlider, QSplitter, QTabWidget, QToolBar,
+                             QPushButton, QSlider, QTabWidget, QToolBar,
                              QVBoxLayout,
                              QWidget)
 
@@ -37,7 +37,7 @@ from core import frame_log as fl
 from core.session import SessionError
 from gui.shell.icons import icon
 from gui.shell.panels import fmt
-from gui.shell.result_views import (BagalkotView, ModelView, SimulationView,
+from gui.shell.result_views import (BagalkotView, ModelView, SimulationView, _View,
                                     SwellingView, YangView)
 from gui.shell.theme import PLOT_FAIL, PLOT_LINE, PLOT_PASS
 
@@ -694,6 +694,29 @@ class LogPlot(QWidget):
 
 
 # ---------------------------------------------------------------------------
+class LiveView(_View):
+    """While logging: the newest frame and IFT / volume against time, as tiles
+    like the result tabs (Layout box, double-click to enlarge).  The frame
+    viewer and the log plot are shared with the Frame and Log Plot tabs, so
+    :meth:`attach` puts them back in the tiles each time logging starts."""
+
+    LAYOUTS = (('Side by side', 1, 2, dict(frame=(0, 0, 1, 1), plot=(0, 1, 1, 1))),
+               ('Stacked', 2, 1, dict(frame=(0, 0, 1, 1), plot=(1, 0, 1, 1))))
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.add_tile('frame', QWidget())
+        self.add_tile('plot', QWidget())
+        self.note.hide()
+        self.finish_layout()
+
+    def attach(self, frames, logplot):
+        self.tiles['frame'].set_content(frames)
+        self.tiles['frame'].watch(frames.view)
+        self.tiles['plot'].set_content(logplot)
+        self.tiles['plot'].watch(logplot.plot)
+
+
 class GraphicsArea(QTabWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -703,15 +726,14 @@ class GraphicsArea(QTabWidget):
         self.frames = FrameViewer()
         self.logplot = LogPlot()
         # While logging: the newest frame and IFT(t) side by side.
-        self.live = QSplitter(Qt.Orientation.Horizontal)
-        self.live.setChildrenCollapsible(False)
+        self.live = LiveView()
         self.results = dict(swelling=SwellingView(), bagalkot=BagalkotView(),
                             yang=YangView(), mesh=ModelView(), simulation=SimulationView())
         self.show_session(None)
 
     def use_store(self, store):
-        """Remember each result tab's layout in ``store`` (QSettings)."""
-        for key, view in self.results.items():
+        """Remember each tab's layout (result tabs and Live) in ``store``."""
+        for key, view in {**self.results, 'live': self.live}.items():
             saved = store.value(f'layout/{key}')
             if saved:
                 view.set_layout(str(saved))
@@ -773,10 +795,7 @@ class GraphicsArea(QTabWidget):
         both growing as frames come in (one 'Live' tab)."""
         if self.indexOf(self.live) < 0 or self.frames.folder is not folder:
             self.clear()
-            self.live.addWidget(self.frames)
-            self.live.addWidget(self.logplot)
-            self.live.setStretchFactor(0, 1)
-            self.live.setStretchFactor(1, 1)
+            self.live.attach(self.frames, self.logplot)
             self.addTab(self.live, icon('series'), 'Live')
         self.frames.set_folder(folder)
         self.frames.step('last')
